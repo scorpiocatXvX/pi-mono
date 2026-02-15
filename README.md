@@ -51,9 +51,30 @@ npm run build        # Build all packages
 npm run check        # Lint, format, and type check
 ./test.sh            # Run tests (skips LLM-dependent tests without API keys)
 ./pi-test.sh         # Run pi from sources (must be run from repo root)
+./pi-test.sh --dist  # Run compiled pi (requires npm run build first)
 ```
 
 > **Note:** `npm run check` requires `npm run build` to be run first. The web-ui package uses `tsc` which needs compiled `.d.ts` files from dependencies.
+
+## Non-Blocking Workflow
+
+Use the workflow helper to isolate long-running tasks in tmux sessions:
+
+```bash
+pnpm workflow:dev              # Window 1: pnpm dev (watch build), Window 2: ./pi-test.sh --dist
+pnpm workflow:build            # Detached one-off pnpm build
+pnpm workflow:release:patch    # Detached release in isolated git worktree
+pnpm workflow:release:minor    # Detached release in isolated git worktree
+pnpm workflow:run              # Detached run for compiled pi (--dist)
+pnpm workflow:run:restart      # Restart compiled pi in background
+pnpm workflow:run:stop         # Stop background compiled pi
+pnpm workflow:run:status       # Check whether compiled pi is running
+pnpm workflow:run:logs         # Show current tmux pane output
+pnpm workflow:run:attach       # Attach to compiled pi session
+pnpm workflow:sessions         # List tmux sessions
+```
+
+`workflow:release:*` runs in a separate worktree under `/tmp/pi-release-worktrees`, so development in `/pi-mono` can continue without interruption.
 
 ## License
 

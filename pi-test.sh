@@ -5,10 +5,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Check for --no-env flag
 NO_ENV=false
+RUN_DIST=false
 ARGS=()
 for arg in "$@"; do
   if [[ "$arg" == "--no-env" ]]; then
     NO_ENV=true
+  elif [[ "$arg" == "--dist" ]]; then
+    RUN_DIST=true
   else
     ARGS+=("$arg")
   fi
@@ -53,4 +56,14 @@ if [[ "$NO_ENV" == "true" ]]; then
   echo "Running without API keys..."
 fi
 
-npx tsx "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" ${ARGS[@]+"${ARGS[@]}"}
+if [[ "$RUN_DIST" == "true" ]]; then
+  DIST_CLI="$SCRIPT_DIR/packages/coding-agent/dist/cli.js"
+  if [[ ! -f "$DIST_CLI" ]]; then
+    echo "Compiled CLI not found at $DIST_CLI" >&2
+    echo "Run 'pnpm build' first, or use ./pi-test.sh without --dist." >&2
+    exit 1
+  fi
+  node "$DIST_CLI" ${ARGS[@]+"${ARGS[@]}"}
+else
+  npx tsx "$SCRIPT_DIR/packages/coding-agent/src/cli.ts" ${ARGS[@]+"${ARGS[@]}"}
+fi
