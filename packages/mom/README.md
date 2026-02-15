@@ -6,7 +6,7 @@ A Slack bot powered by an LLM that can execute bash commands, read/write files, 
 
 - **Minimal by Design**: Turn mom into whatever you need. She builds her own tools without pre-built assumptions
 - **Self-Managing**: Installs tools (apk, npm, etc.), writes scripts, configures credentials. Zero setup from you
-- **Slack Integration**: Responds to @mentions in channels and DMs
+- **Slack Integration**: Processes channel messages (plain and @mentions) and replies in-thread when the incoming message is in a thread (while logging all channel/DM traffic)
 - **Full Bash Access**: Execute any command, read/write files, automate workflows
 - **Docker Sandbox**: Isolate mom in a container (recommended for all use)
 - **Persistent Workspace**: All conversation history, files, and tools stored in one directory you control
@@ -43,7 +43,6 @@ npm install @mariozechner/pi-mom
    - `im:history`
    - `im:read`
    - `im:write`
-   - `users:read`
 5. **Subscribe to Bot Events** (Event Subscriptions):
    - `app_mention`
    - `message.channels`
@@ -125,7 +124,7 @@ Mom is a Node.js app that runs on your host machine. She connects to Slack via S
 - If the message has attachments, they are stored in the channel's `attachments/` folder for mom to access
 - Mom can later search the `log.jsonl` file for previous conversations and reference the attachments
 
-**When you @mention mom (or DM her), she:**
+**When a channel message (plain or @mention) triggers mom, she:**
 1. Syncs all unseen messages from `log.jsonl` into `context.jsonl`. The context is what mom actually sees in terms of content when she responds
 2. Loads **memory** from MEMORY.md files (global and channel-specific)
 3. Responds to your request, dynamically using tools to answer it:
@@ -378,7 +377,7 @@ Mom uses two files per channel to manage conversation history:
 
 **context.jsonl** ([format](../../src/context.ts)) (LLM context):
 - What's sent to the LLM (includes tool results and full history)
-- Auto-synced from `log.jsonl` before each @mention (picks up backfilled messages, channel chatter)
+- Auto-synced from `log.jsonl` before each triggered run (picks up backfilled messages, channel chatter)
 - When context exceeds the LLM's context window size, mom compacts it: keeps recent messages and tool results in full, summarizes older ones into a compaction event. On subsequent requests, the LLM gets the summary + recent messages from the compaction point onward
 - Mom can grep `log.jsonl` for older history beyond what's in context
 
@@ -463,14 +462,63 @@ mom --sandbox=docker:mom-exec ./data-exec
 
 ### Code Structure
 
-- `src/main.ts`: Entry point, CLI arg parsing, handler setup, SlackContext adapter
-- `src/agent.ts`: Agent runner, event handling, tool execution, session management
-- `src/slack.ts`: Slack integration (Socket Mode), backfill, message logging
-- `src/context.ts`: Session manager (context.jsonl), log-to-context sync
+- `src/main.ts`: Entry point and service wiring (`SlackService`)
+- `src/services/mom-run-service.ts`: Run orchestration and per-channel runtime state
+- `src/services/slack-context-service.ts`: Message quoting + response/update behavior
+- `src/services/slack-event-routing-service.ts`: Inbound event routing rules
+- `src/services/slack-service.ts`: Standalone Slack service composition + lifecycle
+- `src/service-runner.ts`: Standalone Slack service process entrypoint
+- `src/service-supervisor.ts`: Supervisor for standalone service lifecycle and manual restart
+- `src/slack.ts`: Slack transport (Socket Mode), backfill, message logging, queueing
+- `src/agent.ts`: Agent runner, tool execution, session management
+- `src/context.ts`: Session manager (`context.jsonl`), log-to-context sync
 - `src/store.ts`: Channel data persistence, attachment downloads
 - `src/log.ts`: Centralized logging (console output)
 - `src/sandbox.ts`: Docker/host sandbox execution
 - `src/tools/`: Tool implementations (bash, read, write, edit, attach)
+
+### Service-Level Testing
+
+From `packages/mom`:
+
+```bash
+npm run test:services
+```
+
+Run one module at a time:
+
+```bash
+npm run test:services:routing
+npm run test:services:context
+npm run test:services:run
+```
+
+### Standalone Slack Service (Manual Restart)
+
+Run only the Slack service module (separate from the `mom` entrypoint):
+
+```bash
+cd packages/mom
+npm run run:slack-service -- --sandbox=docker:mom-sandbox ./data
+```
+
+Run with supervisor (no auto-restart):
+
+```bash
+cd packages/mom
+npm run run:slack-supervisor -- --sandbox=docker:mom-sandbox ./data
+```
+
+Restart/stop/status are explicit commands:
+
+```bash
+cd packages/mom
+npm run restart:slack-service -- ./data
+npm run stop:slack-service -- ./data
+npm run status:slack-service -- ./data
+```
+
+The supervisor keeps a parent process alive and only restarts the Slack service child when you explicitly request restart. This lets you iterate on the Slack pipeline/services without changing your active PI chat session.
 
 ### Running in Dev Mode
 

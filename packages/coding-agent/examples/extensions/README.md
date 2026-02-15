@@ -125,6 +125,7 @@ cp permission-gate.ts ~/.pi/agent/extensions/
 | Extension | Description |
 |-----------|-------------|
 | `with-deps/` | Extension with its own package.json and dependencies (demonstrates jiti module resolution) |
+| `slack-bridge/` | Socket Mode Slack bridge: DM/@mention in, assistant reply back to thread |
 | `file-trigger.ts` | Watches a trigger file and injects contents into conversation |
 
 ## Writing Extensions

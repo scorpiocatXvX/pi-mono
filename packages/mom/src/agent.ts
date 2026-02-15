@@ -154,9 +154,9 @@ function buildSystemPrompt(
 	const channelMappings =
 		channels.length > 0 ? channels.map((c) => `${c.id}\t#${c.name}`).join("\n") : "(no channels loaded)";
 
-	// Format user mappings
+	// Format user mappings (user IDs are always available, names may not be)
 	const userMappings =
-		users.length > 0 ? users.map((u) => `${u.id}\t@${u.userName}\t${u.displayName}`).join("\n") : "(no users loaded)";
+		users.length > 0 ? users.map((u) => `${u.id}\t${u.displayName}`).join("\n") : "(no users loaded)";
 
 	const envDescription = isDocker
 		? `You are running inside a Docker container (Alpine Linux).
@@ -183,7 +183,7 @@ Channels: ${channelMappings}
 
 Users: ${userMappings}
 
-When mentioning users, use <@username> format (e.g., <@mario>).
+When mentioning users, use Slack user IDs: <@U123ABC>.
 
 ## Environment
 ${envDescription}
@@ -313,8 +313,8 @@ tail -30 log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user), text
 # Search for specific topic
 grep -i "topic" log.jsonl | jq -c '{date: .date[0:19], user: (.userName // .user), text}'
 
-# Messages from specific user
-grep '"userName":"mario"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text}'
+# Messages from specific user ID
+grep '"user":"U123ABC"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text}'
 \`\`\`
 
 ## Tools

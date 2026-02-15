@@ -1889,6 +1889,7 @@ All examples in [examples/extensions/](../examples/extensions/).
 | `system-prompt-header.ts` | Display system prompt info | `on("agent_start")`, `getSystemPrompt` |
 | `claude-rules.ts` | Load rules from files | `on("session_start")`, `on("before_agent_start")` |
 | `file-trigger.ts` | File watcher triggers messages | `sendMessage` |
+| `slack-bridge/` | Slack Socket Mode bridge for DM/@mention workflows | `sendUserMessage`, `agent_end` |
 | **Compaction & Sessions** |||
 | `custom-compaction.ts` | Custom compaction summary | `on("session_before_compact")` |
 | `trigger-compact.ts` | Trigger compaction manually | `compact()` |

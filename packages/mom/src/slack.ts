@@ -3,6 +3,7 @@ import { WebClient } from "@slack/web-api";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { basename, join } from "path";
 import * as log from "./log.js";
+import { shouldProcessAppMention, shouldProcessMessageEvent } from "./services/slack-event-routing-service.js";
 import type { Attachment, ChannelStore } from "./store.js";
 
 // ============================================================================
@@ -13,6 +14,7 @@ export interface SlackEvent {
 	type: "mention" | "dm";
 	channel: string;
 	ts: string;
+	threadTs?: string;
 	user: string;
 	text: string;
 	files?: Array<{ name?: string; url_private_download?: string; url_private?: string }>;
@@ -154,8 +156,8 @@ export class SlackBot {
 		const auth = await this.webClient.auth.test();
 		this.botUserId = auth.user_id as string;
 
-		await Promise.all([this.fetchUsers(), this.fetchChannels()]);
-		log.logInfo(`Loaded ${this.channels.size} channels, ${this.users.size} users`);
+		await this.fetchChannels();
+		log.logInfo(`Loaded ${this.channels.size} channels`);
 
 		await this.backfillAllChannels();
 
@@ -166,6 +168,13 @@ export class SlackBot {
 		this.startupTs = (Date.now() / 1000).toFixed(6);
 
 		log.logConnected();
+	}
+
+	async stop(): Promise<void> {
+		const socketClient = this.socketClient as unknown as { disconnect?: () => Promise<void> | void };
+		if (socketClient.disconnect) {
+			await socketClient.disconnect();
+		}
 	}
 
 	getUser(userId: string): SlackUser | undefined {
@@ -269,8 +278,18 @@ export class SlackBot {
 		return queue;
 	}
 
+	private ensureUserIdentity(userId: string): void {
+		if (this.users.has(userId)) {
+			return;
+		}
+		this.users.set(userId, {
+			id: userId,
+			userName: userId,
+			displayName: userId,
+		});
+	}
+
 	private setupEventHandlers(): void {
-		// Channel @mentions
 		this.socketClient.on("app_mention", ({ event, ack }) => {
 			const e = event as {
 				text: string;
@@ -280,11 +299,12 @@ export class SlackBot {
 				files?: Array<{ name: string; url_private_download?: string; url_private?: string }>;
 			};
 
-			// Skip DMs (handled by message event)
-			if (e.channel.startsWith("D")) {
+			if (!shouldProcessAppMention()) {
 				ack();
 				return;
 			}
+
+			this.ensureUserIdentity(e.user);
 
 			const slackEvent: SlackEvent = {
 				type: "mention",
@@ -295,37 +315,18 @@ export class SlackBot {
 				files: e.files,
 			};
 
-			// SYNC: Log to log.jsonl (ALWAYS, even for old messages)
-			// Also downloads attachments in background and stores local paths
+			// Always log incoming mention, even if it's older than startup cutoff.
 			slackEvent.attachments = this.logUserMessage(slackEvent);
 
-			// Only trigger processing for messages AFTER startup (not replayed old messages)
 			if (this.startupTs && e.ts < this.startupTs) {
 				log.logInfo(
-					`[${e.channel}] Logged old message (pre-startup), not triggering: ${slackEvent.text.substring(0, 30)}`,
+					`[${e.channel}] Logged old mention (pre-startup), not triggering: ${slackEvent.text.substring(0, 30)}`,
 				);
 				ack();
 				return;
 			}
 
-			// Check for stop command - execute immediately, don't queue!
-			if (slackEvent.text.toLowerCase().trim() === "stop") {
-				if (this.handler.isRunning(e.channel)) {
-					this.handler.handleStop(e.channel, this); // Don't await, don't queue
-				} else {
-					this.postMessage(e.channel, "_Nothing running_");
-				}
-				ack();
-				return;
-			}
-
-			// SYNC: Check if busy
-			if (this.handler.isRunning(e.channel)) {
-				this.postMessage(e.channel, "_Already working. Say `@mom stop` to cancel._");
-			} else {
-				this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
-			}
-
+			this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
 			ack();
 		});
 
@@ -336,6 +337,7 @@ export class SlackBot {
 				channel: string;
 				user?: string;
 				ts: string;
+				thread_ts?: string;
 				channel_type?: string;
 				subtype?: string;
 				bot_id?: string;
@@ -357,18 +359,15 @@ export class SlackBot {
 			}
 
 			const isDM = e.channel_type === "im";
-			const isBotMention = e.text?.includes(`<@${this.botUserId}>`);
+			const isBotMention = e.text?.includes(`<@${this.botUserId}>`) ?? false;
 
-			// Skip channel @mentions - already handled by app_mention event
-			if (!isDM && isBotMention) {
-				ack();
-				return;
-			}
+			this.ensureUserIdentity(e.user);
 
 			const slackEvent: SlackEvent = {
 				type: isDM ? "dm" : "mention",
 				channel: e.channel,
 				ts: e.ts,
+				threadTs: e.thread_ts,
 				user: e.user,
 				text: (e.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim(),
 				files: e.files,
@@ -385,25 +384,12 @@ export class SlackBot {
 				return;
 			}
 
-			// Only trigger handler for DMs
-			if (isDM) {
-				// Check for stop command - execute immediately, don't queue!
-				if (slackEvent.text.toLowerCase().trim() === "stop") {
-					if (this.handler.isRunning(e.channel)) {
-						this.handler.handleStop(e.channel, this); // Don't await, don't queue
-					} else {
-						this.postMessage(e.channel, "_Nothing running_");
-					}
-					ack();
-					return;
-				}
-
-				if (this.handler.isRunning(e.channel)) {
-					this.postMessage(e.channel, "_Already working. Say `stop` to cancel._");
-				} else {
-					this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
-				}
+			if (!shouldProcessMessageEvent(isDM, isBotMention)) {
+				ack();
+				return;
 			}
+
+			this.getQueue(e.channel).enqueue(() => this.handler.handleEvent(slackEvent, this));
 
 			ack();
 		});
@@ -420,6 +406,7 @@ export class SlackBot {
 		this.logToFile(event.channel, {
 			date: new Date(parseFloat(event.ts) * 1000).toISOString(),
 			ts: event.ts,
+			threadTs: event.threadTs,
 			user: event.user,
 			userName: user?.userName,
 			displayName: user?.displayName,
@@ -464,6 +451,7 @@ export class SlackBot {
 			bot_id?: string;
 			text?: string;
 			ts?: string;
+			thread_ts?: string;
 			subtype?: string;
 			files?: Array<{ name: string }>;
 		};
@@ -505,7 +493,10 @@ export class SlackBot {
 		// Log each message to log.jsonl
 		for (const msg of relevantMessages) {
 			const isMomMessage = msg.user === this.botUserId;
-			const user = this.users.get(msg.user!);
+			if (!isMomMessage && msg.user) {
+				this.ensureUserIdentity(msg.user);
+			}
+			const user = msg.user ? this.users.get(msg.user) : undefined;
 			// Strip @mentions from text (same as live messages)
 			const text = (msg.text || "").replace(/<@[A-Z0-9]+>/gi, "").trim();
 			// Process attachments - queues downloads in background
@@ -514,6 +505,7 @@ export class SlackBot {
 			this.logToFile(channelId, {
 				date: new Date(parseFloat(msg.ts!) * 1000).toISOString(),
 				ts: msg.ts!,
+				threadTs: msg.thread_ts,
 				user: isMomMessage ? "bot" : msg.user!,
 				userName: isMomMessage ? undefined : user?.userName,
 				displayName: isMomMessage ? undefined : user?.displayName,
@@ -556,33 +548,15 @@ export class SlackBot {
 	}
 
 	// ==========================================================================
-	// Private - Fetch Users/Channels
+	// Private - Fetch Channels
 	// ==========================================================================
 
-	private async fetchUsers(): Promise<void> {
-		let cursor: string | undefined;
-		do {
-			const result = await this.webClient.users.list({ limit: 200, cursor });
-			const members = result.members as
-				| Array<{ id?: string; name?: string; real_name?: string; deleted?: boolean }>
-				| undefined;
-			if (members) {
-				for (const u of members) {
-					if (u.id && u.name && !u.deleted) {
-						this.users.set(u.id, { id: u.id, userName: u.name, displayName: u.real_name || u.name });
-					}
-				}
-			}
-			cursor = result.response_metadata?.next_cursor;
-		} while (cursor);
-	}
-
 	private async fetchChannels(): Promise<void> {
-		// Fetch public/private channels
+		// Fetch public channels only. Private channel names require groups:read.
 		let cursor: string | undefined;
 		do {
 			const result = await this.webClient.conversations.list({
-				types: "public_channel,private_channel",
+				types: "public_channel",
 				exclude_archived: true,
 				limit: 200,
 				cursor,
