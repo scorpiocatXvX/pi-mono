@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import { resolve } from "path";
-import { downloadChannel } from "./download.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
 import { SlackService } from "./services/slack-service.js";
 
@@ -11,14 +10,12 @@ const MOM_SLACK_BOT_TOKEN = process.env.MOM_SLACK_BOT_TOKEN;
 interface ParsedArgs {
 	workingDir?: string;
 	sandbox: SandboxConfig;
-	downloadChannel?: string;
 }
 
 function parseArgs(): ParsedArgs {
 	const args = process.argv.slice(2);
 	let sandbox: SandboxConfig = { type: "host" };
 	let workingDir: string | undefined;
-	let downloadChannelId: string | undefined;
 
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
@@ -26,10 +23,6 @@ function parseArgs(): ParsedArgs {
 			sandbox = parseSandboxArg(arg.slice("--sandbox=".length));
 		} else if (arg === "--sandbox") {
 			sandbox = parseSandboxArg(args[++i] || "");
-		} else if (arg.startsWith("--download=")) {
-			downloadChannelId = arg.slice("--download=".length);
-		} else if (arg === "--download") {
-			downloadChannelId = args[++i];
 		} else if (!arg.startsWith("-")) {
 			workingDir = arg;
 		}
@@ -38,39 +31,26 @@ function parseArgs(): ParsedArgs {
 	return {
 		workingDir: workingDir ? resolve(workingDir) : undefined,
 		sandbox,
-		downloadChannel: downloadChannelId,
 	};
 }
 
 const parsedArgs = parseArgs();
 
-if (parsedArgs.downloadChannel) {
-	if (!MOM_SLACK_BOT_TOKEN) {
-		console.error("Missing env: MOM_SLACK_BOT_TOKEN");
-		process.exit(1);
-	}
-	await downloadChannel(parsedArgs.downloadChannel, MOM_SLACK_BOT_TOKEN);
-	process.exit(0);
-}
-
 if (!parsedArgs.workingDir) {
-	console.error("Usage: mom [--sandbox=host|docker:<name>] <working-directory>");
-	console.error("       mom --download <channel-id>");
+	console.error("Usage: mom-service [--sandbox=host|docker:<name>] <working-directory>");
 	process.exit(1);
 }
-
-const { workingDir, sandbox } = { workingDir: parsedArgs.workingDir, sandbox: parsedArgs.sandbox };
 
 if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN) {
 	console.error("Missing env: MOM_SLACK_APP_TOKEN, MOM_SLACK_BOT_TOKEN");
 	process.exit(1);
 }
 
-await validateSandbox(sandbox);
+await validateSandbox(parsedArgs.sandbox);
 
 const service = new SlackService({
-	workingDir,
-	sandbox,
+	workingDir: parsedArgs.workingDir,
+	sandbox: parsedArgs.sandbox,
 	appToken: MOM_SLACK_APP_TOKEN,
 	botToken: MOM_SLACK_BOT_TOKEN,
 });

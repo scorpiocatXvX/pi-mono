@@ -4,7 +4,9 @@
 	"description": "Slack bot that delegates messages to the pi coding agent",
 	"type": "module",
 	"bin": {
-		"mom": "dist/main.js"
+		"mom": "dist/main.js",
+		"mom-service": "dist/service-runner.js",
+		"mom-service-ctl": "dist/service-control.js"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -16,6 +18,16 @@
 		"clean": "rm -rf dist",
 		"build": "tsgo -p tsconfig.build.json && chmod +x dist/main.js",
 		"dev": "tsgo -p tsconfig.build.json --watch --preserveWatchOutput",
+		"run:slack-service": "tsx src/service-runner.ts",
+		"run:slack-supervisor": "tsx src/service-supervisor.ts",
+		"dev:slack-service": "tsx src/service-supervisor.ts",
+		"restart:slack-service": "tsx src/service-control.ts restart",
+		"stop:slack-service": "tsx src/service-control.ts stop",
+		"status:slack-service": "tsx src/service-control.ts status",
+		"test:services": "tsx --test test/services/*.test.ts",
+		"test:services:routing": "tsx --test test/services/routing.test.ts",
+		"test:services:context": "tsx --test test/services/slack-context-service.test.ts",
+		"test:services:run": "tsx --test test/services/mom-run-service.test.ts",
 		"prepublishOnly": "npm run clean && npm run build"
 	},
 	"dependencies": {
