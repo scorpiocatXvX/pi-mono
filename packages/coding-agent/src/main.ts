@@ -18,6 +18,7 @@ import { AuthStorage } from "./core/auth-storage.js";
 import { DEFAULT_THINKING_LEVEL } from "./core/defaults.js";
 import { exportFromFile } from "./core/export-html/index.js";
 import type { LoadExtensionsResult } from "./core/extensions/index.js";
+import { momServiceExtension } from "./core/extensions/mom-service-extension.js";
 import { KeybindingsManager } from "./core/keybindings.js";
 import { ModelRegistry } from "./core/model-registry.js";
 import { resolveCliModel, resolveModelScope, type ScopedModel } from "./core/model-resolver.js";
@@ -558,6 +559,7 @@ export async function main(args: string[]) {
 		noThemes: firstPass.noThemes,
 		systemPrompt: firstPass.systemPrompt,
 		appendSystemPrompt: firstPass.appendSystemPrompt,
+		extensionFactories: [momServiceExtension],
 	});
 	await resourceLoader.reload();
 	time("resourceLoader.reload");
