@@ -62,7 +62,7 @@ Use the workflow helper to isolate long-running tasks in tmux sessions:
 
 ```bash
 pnpm workflow:dev              # Window 1: pnpm dev (watch build), Window 2: ./pi-test.sh --dist
-pnpm workflow:build            # Detached one-off pnpm build
+pnpm workflow:build            # Detached one-off pnpm build (session auto-exits when finished)
 pnpm workflow:release:patch    # Detached release in isolated git worktree
 pnpm workflow:release:minor    # Detached release in isolated git worktree
 pnpm workflow:run              # Detached run for compiled pi (--dist)
@@ -72,9 +72,32 @@ pnpm workflow:run:status       # Check whether compiled pi is running
 pnpm workflow:run:logs         # Show current tmux pane output
 pnpm workflow:run:attach       # Attach to compiled pi session
 pnpm workflow:sessions         # List tmux sessions
+pnpm workflow:session:kill -- <session-name>  # Delete a specific tmux session
 ```
 
 `workflow:release:*` runs in a separate worktree under `/tmp/pi-release-worktrees`, so development in `/pi-mono` can continue without interruption.
+
+## Local pi Commands
+
+This repository includes a local extension with two project-scoped commands:
+
+```text
+/gh-pr-service start|stop|restart|status
+/gh-pr create <head> [base] [title...]
+/gh-pr update <number> <head> [base]
+/gh-pr ship [base] [commit-message...]
+/tmux-session list
+/tmux-session kill <session-name>
+```
+
+- `/gh-pr-service` manages a detached standalone process that handles GitHub PR operations.
+- `/gh-pr create` creates a PR from `<head>` into `[base]` (default `main`) and writes an auto-generated change summary.
+- If `/gh-pr create` omits `[title]`, the service auto-generates a PR title from commit subjects between `origin/[base]..origin/[head]`.
+- `/gh-pr update` refreshes an existing PR description with the current change summary for `<head>` vs `[base]`.
+- `/gh-pr ship` is the one-click flow: detect local changes, stage+commit (auto message if omitted), push current branch, then create or update the PR.
+- The service reads `GITHUB_TOKEN` (or `GH_TOKEN`) from environment first, then falls back to the project-local `.env`.
+- Service state is stored in `.pi/gh-pr-service/` (pid, log, request/response queue).
+- `/tmux-session` is a local project command for listing or deleting workflow tmux sessions.
 
 ## License
 

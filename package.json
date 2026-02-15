@@ -25,6 +25,7 @@
 		"workflow:run:status": "bash scripts/workflow.sh run status",
 		"workflow:run:logs": "bash scripts/workflow.sh run logs",
 		"workflow:run:attach": "bash scripts/workflow.sh run attach",
+		"workflow:session:kill": "bash scripts/workflow.sh kill",
 		"workflow:sessions": "bash scripts/workflow.sh list",
 		"check": "biome check --write --error-on-warnings . && tsgo --noEmit && cd packages/web-ui && npm run check",
 		"test": "npm run test --workspaces --if-present",

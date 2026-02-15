@@ -10,6 +10,7 @@ usage() {
 	echo "  bash scripts/workflow.sh build"
 	echo "  bash scripts/workflow.sh release <patch|minor>"
 	echo "  bash scripts/workflow.sh run <start|restart|stop|status|logs|attach>"
+	echo "  bash scripts/workflow.sh kill <session>"
 	echo "  bash scripts/workflow.sh list"
 }
 
@@ -45,11 +46,11 @@ start_build_session() {
 	local timestamp session command
 	timestamp="$(date +%Y%m%d-%H%M%S)"
 	session="${PI_BUILD_SESSION:-pi-build-$timestamp}"
-	command='set +e; pnpm build; code=$?; echo; echo "[build] exit code: $code"; exec bash'
+	command='set +e; pnpm build; code=$?; echo; echo "[build] exit code: $code"; exit "$code"'
 
 	tmux new-session -d -s "$session" -c "$ROOT_DIR" "bash -lc '$command'"
 
-	echo "Build started in detached tmux session '$session'."
+	echo "Build started in detached tmux session '$session' (auto-exits when build finishes)."
 	echo "Attach with: tmux attach -t $session"
 }
 
@@ -160,6 +161,23 @@ list_sessions() {
 	fi
 }
 
+kill_session() {
+	require_cmd tmux
+
+	local session="${1:-}"
+	if [[ -z "$session" ]]; then
+		echo "Missing session name. Usage: bash scripts/workflow.sh kill <session>" >&2
+		exit 1
+	fi
+
+	if tmux has-session -t "$session" 2>/dev/null; then
+		tmux kill-session -t "$session"
+		echo "Killed tmux session '$session'."
+	else
+		echo "Session '$session' does not exist."
+	fi
+}
+
 main() {
 	local action="${1:-}"
 	case "$action" in
@@ -178,6 +196,9 @@ main() {
 		;;
 	run)
 		manage_run_session "${2:-start}"
+		;;
+	kill)
+		kill_session "${2:-}"
 		;;
 	list)
 		list_sessions
