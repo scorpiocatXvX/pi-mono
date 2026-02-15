@@ -544,8 +544,12 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 
 			queue.enqueueMessage(threadMessage, "thread", "tool result thread", false);
 
+			const stepName = label || pending?.toolName || agentEvent.toolName;
 			if (agentEvent.isError) {
+				queue.enqueue(() => ctx.respond(`_Step failed: ${stepName} (${duration}s)_`, false), "tool error step");
 				queue.enqueue(() => ctx.respond(`_Error: ${truncate(resultStr, 200)}_`, false), "tool error");
+			} else {
+				queue.enqueue(() => ctx.respond(`_Step done: ${stepName} (${duration}s)_`, false), "tool done");
 			}
 		} else if (event.type === "message_start") {
 			const agentEvent = event as AgentEvent & { type: "message_start" };

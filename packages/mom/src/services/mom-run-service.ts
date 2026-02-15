@@ -82,6 +82,7 @@ export class MomRunService implements MomHandler {
 			const ctx = createSlackContext(event, slack, state, isEvent);
 			await ctx.setTyping(true);
 			await ctx.setWorking(true);
+			await ctx.respond("_收到，正在处理。下一步：先分析你的消息并制定执行步骤。_", false);
 			const result = await state.runner.run(ctx as any, state.store);
 			await ctx.setWorking(false);
 
