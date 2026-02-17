@@ -3,7 +3,7 @@ export function shouldProcessAppMention(): boolean {
 	return false;
 }
 
-export function shouldProcessMessageEvent(isDM: boolean, _isBotMention: boolean): boolean {
-	// Process all non-DM channel messages, including @mentions.
-	return !isDM;
+export function shouldProcessMessageEvent(_isDM: boolean, _isBotMention: boolean): boolean {
+	// Process both channel messages and DMs.
+	return true;
 }

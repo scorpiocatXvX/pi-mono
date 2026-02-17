@@ -3,6 +3,7 @@
 import { resolve } from "path";
 import { downloadChannel } from "./download.js";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
+import { detectRunningMomService } from "./service-state.js";
 import { SlackService } from "./services/slack-service.js";
 
 const MOM_SLACK_APP_TOKEN = process.env.MOM_SLACK_APP_TOKEN;
@@ -67,6 +68,12 @@ if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN) {
 }
 
 await validateSandbox(sandbox);
+
+const runningService = detectRunningMomService(workingDir);
+if (runningService) {
+	console.log(`mom service already running via ${runningService.source} (pid ${runningService.pid})`);
+	process.exit(0);
+}
 
 const service = new SlackService({
 	workingDir,

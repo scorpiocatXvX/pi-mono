@@ -6,9 +6,9 @@ test("app mentions are ignored", () => {
 	assert.equal(shouldProcessAppMention(), false);
 });
 
-test("all channel messages (plain + mentions) are processed", () => {
+test("channel messages and DMs are processed", () => {
 	assert.equal(shouldProcessMessageEvent(false, false), true);
 	assert.equal(shouldProcessMessageEvent(false, true), true);
-	assert.equal(shouldProcessMessageEvent(true, false), false);
-	assert.equal(shouldProcessMessageEvent(true, true), false);
+	assert.equal(shouldProcessMessageEvent(true, false), true);
+	assert.equal(shouldProcessMessageEvent(true, true), true);
 });

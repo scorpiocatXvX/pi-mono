@@ -22,7 +22,16 @@ interface MomServiceState {
 const DEFAULT_SANDBOX = "host";
 const DEFAULT_WORKING_DIR = ".mom";
 const STATE_FILE_NAME = ".mom-service.state.json";
+const SUPERVISOR_PID_FILE_NAME = ".mom-service-supervisor.pid";
 const LOG_FILE_NAME = "mom-service.log";
+
+interface RunningMomService {
+	source: "mom-service" | "mom-service-supervisor";
+	pid: number;
+	workingDir: string;
+	sandbox?: string;
+	logFile?: string;
+}
 
 function parseMomServiceArgs(rawArgs: string): { command?: MomServiceCommand; error?: string } {
 	const tokens = rawArgs.trim().length === 0 ? [] : rawArgs.trim().split(/\s+/);
@@ -76,6 +85,10 @@ function getStateFilePath(workingDir: string): string {
 	return join(workingDir, STATE_FILE_NAME);
 }
 
+function getSupervisorPidFilePath(workingDir: string): string {
+	return join(workingDir, SUPERVISOR_PID_FILE_NAME);
+}
+
 function readState(workingDir: string): MomServiceState | null {
 	const stateFile = getStateFilePath(workingDir);
 	if (!existsSync(stateFile)) {
@@ -120,6 +133,32 @@ function removeState(workingDir: string): void {
 	}
 }
 
+function readSupervisorPid(workingDir: string): number | null {
+	const pidFile = getSupervisorPidFilePath(workingDir);
+	if (!existsSync(pidFile)) {
+		return null;
+	}
+
+	const raw = readFileSync(pidFile, "utf8").trim();
+	const pid = Number(raw);
+	if (!Number.isFinite(pid) || pid <= 0) {
+		return null;
+	}
+	return pid;
+}
+
+function removeSupervisorPid(workingDir: string): void {
+	const pidFile = getSupervisorPidFilePath(workingDir);
+	if (!existsSync(pidFile)) {
+		return;
+	}
+	try {
+		unlinkSync(pidFile);
+	} catch {
+		// Ignore cleanup errors.
+	}
+}
+
 function isProcessAlive(pid: number): boolean {
 	try {
 		process.kill(pid, 0);
@@ -138,6 +177,36 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<boole
 		await new Promise<void>((resolve) => setTimeout(resolve, 100));
 	}
 	return !isProcessAlive(pid);
+}
+
+function getRunningMomService(workingDir: string): RunningMomService | null {
+	const state = readState(workingDir);
+	if (state && isProcessAlive(state.pid)) {
+		return {
+			source: "mom-service",
+			pid: state.pid,
+			workingDir: state.workingDir,
+			sandbox: state.sandbox,
+			logFile: state.logFile,
+		};
+	}
+	if (state) {
+		removeState(workingDir);
+	}
+
+	const supervisorPid = readSupervisorPid(workingDir);
+	if (supervisorPid && isProcessAlive(supervisorPid)) {
+		return {
+			source: "mom-service-supervisor",
+			pid: supervisorPid,
+			workingDir,
+		};
+	}
+	if (supervisorPid) {
+		removeSupervisorPid(workingDir);
+	}
+
+	return null;
 }
 
 function notify(ctx: ExtensionCommandContext, message: string, type: "info" | "warning" | "error" = "info"): void {
@@ -159,12 +228,9 @@ async function startMomService(ctx: ExtensionContext, workingDir: string, sandbo
 		throw new Error("Missing MOM_SLACK_APP_TOKEN or MOM_SLACK_BOT_TOKEN");
 	}
 
-	const existing = readState(workingDir);
-	if (existing && isProcessAlive(existing.pid)) {
-		throw new Error(`mom service is already running (pid ${existing.pid})`);
-	}
-	if (existing) {
-		removeState(workingDir);
+	const running = getRunningMomService(workingDir);
+	if (running) {
+		throw new Error(`mom service is already running via ${running.source} (pid ${running.pid})`);
 	}
 
 	mkdirSync(workingDir, { recursive: true });
@@ -220,39 +286,38 @@ async function startMomService(ctx: ExtensionContext, workingDir: string, sandbo
 }
 
 async function stopMomService(workingDir: string): Promise<string> {
-	const state = readState(workingDir);
-	if (!state) {
-		return `stopped (no state file at ${workingDir})`;
+	const running = getRunningMomService(workingDir);
+	if (!running) {
+		return `stopped (no running service at ${workingDir})`;
 	}
 
-	if (!isProcessAlive(state.pid)) {
-		removeState(workingDir);
-		return "stopped (process already exited)";
-	}
-
-	process.kill(state.pid, "SIGTERM");
-	const exited = await waitForProcessExit(state.pid, 5000);
+	process.kill(running.pid, "SIGTERM");
+	const exited = await waitForProcessExit(running.pid, 5000);
 	if (!exited) {
-		process.kill(state.pid, "SIGKILL");
-		await waitForProcessExit(state.pid, 2000);
+		process.kill(running.pid, "SIGKILL");
+		await waitForProcessExit(running.pid, 2000);
 	}
 
-	removeState(workingDir);
-	return `stopped (pid ${state.pid})`;
+	if (running.source === "mom-service") {
+		removeState(workingDir);
+	} else {
+		removeSupervisorPid(workingDir);
+	}
+
+	return `stopped (pid ${running.pid}, source=${running.source})`;
 }
 
 function statusMomService(workingDir: string): string {
-	const state = readState(workingDir);
-	if (!state) {
-		return `stopped (no state file at ${workingDir})`;
+	const running = getRunningMomService(workingDir);
+	if (!running) {
+		return `stopped (no running service at ${workingDir})`;
 	}
 
-	if (!isProcessAlive(state.pid)) {
-		removeState(workingDir);
-		return "stopped (stale state was cleaned up)";
+	if (running.source === "mom-service") {
+		return `running (pid ${running.pid}, source=${running.source}, sandbox=${running.sandbox}, dir=${running.workingDir}, log=${running.logFile})`;
 	}
 
-	return `running (pid ${state.pid}, sandbox=${state.sandbox}, dir=${state.workingDir}, log=${state.logFile})`;
+	return `running (pid ${running.pid}, source=${running.source}, dir=${running.workingDir})`;
 }
 
 function getUsage(): string {
@@ -311,8 +376,14 @@ export const momServiceExtension: ExtensionFactory = (pi) => {
 					return;
 				}
 
-				const existingState = readState(workingDir);
-				const restartSandbox = command.sandbox ?? existingState?.sandbox ?? DEFAULT_SANDBOX;
+				const running = getRunningMomService(workingDir);
+				if (running?.source === "mom-service-supervisor") {
+					process.kill(running.pid, "SIGUSR1");
+					notify(ctx, `mom-service: restarted (pid ${running.pid}, source=${running.source})`, "info");
+					return;
+				}
+
+				const restartSandbox = command.sandbox ?? running?.sandbox ?? DEFAULT_SANDBOX;
 				await stopMomService(workingDir);
 				const message = await startMomService(ctx, workingDir, restartSandbox);
 				notify(ctx, `mom-service: ${message}`, "info");

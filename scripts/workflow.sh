@@ -10,6 +10,7 @@ usage() {
 	echo "  bash scripts/workflow.sh build"
 	echo "  bash scripts/workflow.sh release <patch|minor>"
 	echo "  bash scripts/workflow.sh run <start|restart|stop|status|logs|attach>"
+	echo "  bash scripts/workflow.sh mom <start|restart|stop|status|logs|attach>"
 	echo "  bash scripts/workflow.sh kill <session>"
 	echo "  bash scripts/workflow.sh list"
 }
@@ -154,6 +155,72 @@ manage_run_session() {
 	esac
 }
 
+manage_mom_session() {
+	require_cmd tmux
+
+	local action="${1:-start}"
+	local session="${PI_MOM_SESSION:-pi-mom-service}"
+	local start_command="${PI_MOM_START_COMMAND:-pnpm mom:service:start}"
+	local command="set +e; $start_command; code=\$?; echo; echo \"[mom-service] exit code: \$code\"; exec bash"
+
+	case "$action" in
+	start)
+		if tmux has-session -t "$session" 2>/dev/null; then
+			echo "Session '$session' is already running."
+			echo "Attach with: tmux attach -t $session"
+			return
+		fi
+		tmux new-session -d -s "$session" -n "mom" -c "$ROOT_DIR" "bash -lc '$command'"
+		echo "mom service started in detached tmux session '$session'."
+		echo "Attach with: tmux attach -t $session"
+		;;
+	restart)
+		if tmux has-session -t "$session" 2>/dev/null; then
+			tmux kill-session -t "$session"
+		fi
+		tmux new-session -d -s "$session" -n "mom" -c "$ROOT_DIR" "bash -lc '$command'"
+		echo "mom service restarted in detached tmux session '$session'."
+		echo "Attach with: tmux attach -t $session"
+		;;
+	stop)
+		if tmux has-session -t "$session" 2>/dev/null; then
+			tmux kill-session -t "$session"
+			echo "Stopped tmux session '$session'."
+		else
+			echo "Session '$session' is not running."
+		fi
+		;;
+	status)
+		if tmux has-session -t "$session" 2>/dev/null; then
+			echo "Session '$session' is running."
+		else
+			echo "Session '$session' is not running."
+		fi
+		;;
+	logs)
+		if tmux has-session -t "$session" 2>/dev/null; then
+			tmux capture-pane -p -t "$session:mom"
+		else
+			echo "Session '$session' is not running."
+			exit 1
+		fi
+		;;
+	attach)
+		if tmux has-session -t "$session" 2>/dev/null; then
+			tmux attach -t "$session"
+		else
+			echo "Session '$session' is not running."
+			exit 1
+		fi
+		;;
+	*)
+		echo "Unknown mom action: $action" >&2
+		usage
+		exit 1
+		;;
+	esac
+}
+
 list_sessions() {
 	require_cmd tmux
 	if ! tmux list-sessions 2>/dev/null; then
@@ -196,6 +263,9 @@ main() {
 		;;
 	run)
 		manage_run_session "${2:-start}"
+		;;
+	mom)
+		manage_mom_session "${2:-start}"
 		;;
 	kill)
 		kill_session "${2:-}"

@@ -6,7 +6,7 @@ This directory contains the Slack message pipeline split into focused services s
 
 - `slack-event-routing-service.ts`
   - Pure routing rules for inbound Slack events.
-  - Current policy: process all channel messages (plain and `@mentions`); ignore DMs.
+  - Current policy: process all channel messages and DMs.
 - `slack-context-service.ts`
   - Builds the runtime Slack context used by the runner.
   - Handles quote prefix generation and main-message update/send behavior.

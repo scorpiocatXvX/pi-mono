@@ -1,5 +1,5 @@
 import { Agent, type AgentEvent } from "@mariozechner/pi-agent-core";
-import { getModel, type ImageContent } from "@mariozechner/pi-ai";
+import type { Api, ImageContent, Model } from "@mariozechner/pi-ai";
 import {
 	AgentSession,
 	AuthStorage,
@@ -23,8 +23,66 @@ import type { ChannelInfo, SlackContext, UserInfo } from "./slack.js";
 import type { ChannelStore } from "./store.js";
 import { createMomTools, setUploadFunction } from "./tools/index.js";
 
-// Hardcoded model for now - TODO: make configurable (issue #63)
-const model = getModel("anthropic", "claude-sonnet-4-5");
+const MOM_PROVIDER = "packycode-provider";
+const PACKYCODE_DEFAULT_BASE_URL = "https://codex-api.packycode.com/v1";
+
+function readDotEnvValue(key: string): string | undefined {
+	const envPath = join(process.cwd(), ".env");
+	if (!existsSync(envPath)) return undefined;
+
+	const envText = readFileSync(envPath, "utf8");
+	for (const rawLine of envText.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith("#")) continue;
+		const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+		if (!match || match[1] !== key) continue;
+		const value = match[2].trim();
+		return value.replace(/^['"]|['"]$/g, "").trim();
+	}
+
+	return undefined;
+}
+
+const PACKYCODE_BASE_URL =
+	process.env.PACKYCODE_BASE_URL?.trim() || readDotEnvValue("PACKYCODE_BASE_URL") || PACKYCODE_DEFAULT_BASE_URL;
+const PACKYCODE_API_KEY =
+	process.env.PACKYCODE_API_KEY?.trim() || readDotEnvValue("PACKYCODE_API_KEY") || "$PACKYCODE_API_KEY";
+
+function packycodeModel(
+	id: string,
+	name: string,
+	contextWindow: number,
+	maxTokens: number,
+	input: ("text" | "image")[] = ["text", "image"],
+) {
+	return {
+		id,
+		name,
+		reasoning: true,
+		input,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow,
+		maxTokens,
+	};
+}
+
+function registerPackycodeProvider(modelRegistry: ModelRegistry): void {
+	modelRegistry.registerProvider(MOM_PROVIDER, {
+		baseUrl: PACKYCODE_BASE_URL,
+		apiKey: PACKYCODE_API_KEY,
+		api: "openai-responses",
+		models: [
+			packycodeModel("gpt-5.1", "GPT-5.1", 272000, 128000),
+			packycodeModel("gpt-5.1-codex", "GPT-5.1 Codex", 272000, 128000),
+			packycodeModel("gpt-5.1-codex-mini", "GPT-5.1 Codex Mini", 272000, 128000),
+			packycodeModel("gpt-5.1-codex-max", "GPT-5.1 Codex Max", 272000, 128000),
+			packycodeModel("gpt-5.2", "GPT-5.2", 272000, 128000),
+			packycodeModel("gpt-5.2-codex", "GPT-5.2 Codex", 272000, 128000),
+			packycodeModel("gpt-5.3-codex", "GPT-5.3 Codex", 272000, 128000),
+			packycodeModel("gpt-5.3-codex-spark", "GPT-5.3 Codex Spark", 128000, 128000, ["text"]),
+		],
+	});
+}
 
 export interface PendingMessage {
 	userName: string;
@@ -42,12 +100,22 @@ export interface AgentRunner {
 	abort(): void;
 }
 
-async function getAnthropicApiKey(authStorage: AuthStorage): Promise<string> {
-	const key = await authStorage.getApiKey("anthropic");
+function getMomModel(modelRegistry: ModelRegistry): Model<Api> {
+	const model = modelRegistry.getAll().find((candidate) => candidate.provider === MOM_PROVIDER);
+	if (!model) {
+		throw new Error(
+			`No models found for provider "${MOM_PROVIDER}". Configure it in ${join(homedir(), ".pi", "agent", "models.json")}.`,
+		);
+	}
+	return model;
+}
+
+async function getProviderApiKey(authStorage: AuthStorage, provider: string): Promise<string> {
+	const key = await authStorage.getApiKey(provider);
 	if (!key) {
 		throw new Error(
-			"No API key found for anthropic.\n\n" +
-				"Set an API key environment variable, or use /login with Anthropic and link to auth.json from " +
+			`No API key found for ${provider}.\n\n` +
+				"Set an API key environment variable, or configure apiKey in models.json, or use /login and link auth.json from " +
 				join(homedir(), ".pi", "mom", "auth.json"),
 		);
 	}
@@ -319,6 +387,10 @@ grep '"user":"U123ABC"' log.jsonl | tail -20 | jq -c '{date: .date[0:19], text}'
 
 ## Tools
 - bash: Run shell commands (primary tool). Install packages as needed.
+- For PR automation in this repo, use one-shot wrapper commands only:
+  - ROOT="$(git rev-parse --show-toplevel)" && bash "$ROOT/scripts/gh-pr-safe.sh" ship <base> [commit-message...]
+  - ROOT="$(git rev-parse --show-toplevel)" && bash "$ROOT/scripts/gh-pr-safe.sh" status|start|stop
+- Never run daemon scripts directly in bash (for example: *daemon*.mjs). Never chain daemon startup with business commands.
 - read: Read files
 - write: Create/overwrite files
 - edit: Surgical file edits
@@ -430,6 +502,8 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 	// Auth stored outside workspace so agent can't access it
 	const authStorage = new AuthStorage(join(homedir(), ".pi", "mom", "auth.json"));
 	const modelRegistry = new ModelRegistry(authStorage);
+	registerPackycodeProvider(modelRegistry);
+	const model = getMomModel(modelRegistry);
 
 	// Create agent
 	const agent = new Agent({
@@ -440,7 +514,7 @@ function createRunner(sandboxConfig: SandboxConfig, channelId: string, channelDi
 			tools,
 		},
 		convertToLlm,
-		getApiKey: async () => getAnthropicApiKey(authStorage),
+		getApiKey: async (provider) => getProviderApiKey(authStorage, provider || model.provider),
 	});
 
 	// Load existing messages

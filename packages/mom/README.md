@@ -6,7 +6,7 @@ A Slack bot powered by an LLM that can execute bash commands, read/write files, 
 
 - **Minimal by Design**: Turn mom into whatever you need. She builds her own tools without pre-built assumptions
 - **Self-Managing**: Installs tools (apk, npm, etc.), writes scripts, configures credentials. Zero setup from you
-- **Slack Integration**: Processes channel messages (plain and @mentions) and replies in-thread when the incoming message is in a thread (while logging all channel/DM traffic)
+- **Slack Integration**: Processes channel messages and DMs, and replies in-thread when the incoming message is in a thread
 - **Full Bash Access**: Execute any command, read/write files, automate workflows
 - **Docker Sandbox**: Isolate mom in a container (recommended for all use)
 - **Persistent Workspace**: All conversation history, files, and tools stored in one directory you control
@@ -124,7 +124,7 @@ Mom is a Node.js app that runs on your host machine. She connects to Slack via S
 - If the message has attachments, they are stored in the channel's `attachments/` folder for mom to access
 - Mom can later search the `log.jsonl` file for previous conversations and reference the attachments
 
-**When a channel message (plain or @mention) triggers mom, she:**
+**When a message triggers mom, she:**
 1. Syncs all unseen messages from `log.jsonl` into `context.jsonl`. The context is what mom actually sees in terms of content when she responds
 2. Loads **memory** from MEMORY.md files (global and channel-specific)
 3. Responds to your request, dynamically using tools to answer it:

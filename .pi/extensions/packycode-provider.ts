@@ -1,7 +1,29 @@
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 
+function readDotEnvValue(key: string): string | undefined {
+	const envPath = join(process.cwd(), ".env");
+	if (!existsSync(envPath)) return undefined;
+
+	const envText = readFileSync(envPath, "utf8");
+	for (const rawLine of envText.split(/\r?\n/)) {
+		const line = rawLine.trim();
+		if (!line || line.startsWith("#")) continue;
+		const match = line.match(/^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$/);
+		if (!match || match[1] !== key) continue;
+		const value = match[2].trim();
+		return value.replace(/^['\"]|['\"]$/g, "").trim();
+	}
+
+	return undefined;
+}
+
 const PACKYCODE_DEFAULT_BASE_URL = "https://codex-api.packycode.com/v1";
-const PACKYCODE_BASE_URL = process.env.PACKYCODE_BASE_URL?.trim() || PACKYCODE_DEFAULT_BASE_URL;
+const PACKYCODE_BASE_URL =
+	process.env.PACKYCODE_BASE_URL?.trim() || readDotEnvValue("PACKYCODE_BASE_URL") || PACKYCODE_DEFAULT_BASE_URL;
+const PACKYCODE_API_KEY =
+	process.env.PACKYCODE_API_KEY?.trim() || readDotEnvValue("PACKYCODE_API_KEY") || "$PACKYCODE_API_KEY";
 
 function model(
 	id: string,
@@ -24,7 +46,7 @@ function model(
 export default function (pi: ExtensionAPI) {
 	pi.registerProvider("packycode", {
 		baseUrl: PACKYCODE_BASE_URL,
-		apiKey: "sk-xENwzlC1Lg9kNn4kSixnQbj1vlJD9zWo",
+		apiKey: PACKYCODE_API_KEY,
 		api: "openai-responses",
 		models: [
 			model("gpt-5.1", "GPT-5.1", 272000, 128000),
