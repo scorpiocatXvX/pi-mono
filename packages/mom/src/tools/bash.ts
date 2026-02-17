@@ -26,6 +26,11 @@ interface BashToolDetails {
 	fullOutputPath?: string;
 }
 
+function findForbiddenDaemonToken(command: string): string | undefined {
+	const match = command.match(/\b[^\s]*daemon[^\s]*\b/i);
+	return match?.[0];
+}
+
 export function createBashTool(executor: Executor): AgentTool<typeof bashSchema> {
 	return {
 		name: "bash",
@@ -37,6 +42,15 @@ export function createBashTool(executor: Executor): AgentTool<typeof bashSchema>
 			{ command, timeout }: { label: string; command: string; timeout?: number },
 			signal?: AbortSignal,
 		) => {
+			const forbiddenDaemonToken = findForbiddenDaemonToken(command);
+			if (forbiddenDaemonToken) {
+				throw new Error(
+					`Refusing to run daemon-like command token "${forbiddenDaemonToken}" in bash tool. ` +
+						"Use a one-shot wrapper command instead (for PR automation: " +
+						'ROOT="$(git rev-parse --show-toplevel)" && bash "$ROOT/scripts/gh-pr-safe.sh" ship main).',
+				);
+			}
+
 			// Track output for potential temp file writing
 			let tempFilePath: string | undefined;
 			let tempFileStream: ReturnType<typeof createWriteStream> | undefined;

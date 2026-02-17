@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
+import { existsSync, unlinkSync, writeFileSync } from "fs";
 import { resolve } from "path";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
+import { detectRunningMomService } from "./service-state.js";
 import { SlackService } from "./services/slack-service.js";
 
 const MOM_SLACK_APP_TOKEN = process.env.MOM_SLACK_APP_TOKEN;
@@ -48,6 +50,29 @@ if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN) {
 
 await validateSandbox(parsedArgs.sandbox);
 
+const runningService = detectRunningMomService(parsedArgs.workingDir);
+if (runningService) {
+	console.log(`mom service already running via ${runningService.source} (pid ${runningService.pid})`);
+	process.exit(0);
+}
+
+const stateFile = `${parsedArgs.workingDir}/.mom-service.state.json`;
+let cleanedUp = false;
+
+function writeStateFile(): void {
+	writeFileSync(stateFile, `${JSON.stringify({ pid: process.pid })}\n`, "utf-8");
+}
+
+function cleanupStateFile(): void {
+	if (cleanedUp) {
+		return;
+	}
+	cleanedUp = true;
+	if (existsSync(stateFile)) {
+		unlinkSync(stateFile);
+	}
+}
+
 const service = new SlackService({
 	workingDir: parsedArgs.workingDir,
 	sandbox: parsedArgs.sandbox,
@@ -55,12 +80,21 @@ const service = new SlackService({
 	botToken: MOM_SLACK_BOT_TOKEN,
 });
 
+writeStateFile();
+process.on("exit", cleanupStateFile);
+
 process.on("SIGINT", () => {
-	void service.stop().finally(() => process.exit(0));
+	void service.stop().finally(() => {
+		cleanupStateFile();
+		process.exit(0);
+	});
 });
 
 process.on("SIGTERM", () => {
-	void service.stop().finally(() => process.exit(0));
+	void service.stop().finally(() => {
+		cleanupStateFile();
+		process.exit(0);
+	});
 });
 
 await service.start();

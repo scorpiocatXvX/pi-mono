@@ -4,6 +4,7 @@ import { type ChildProcess, spawn } from "child_process";
 import { existsSync, unlinkSync, writeFileSync } from "fs";
 import { join, resolve } from "path";
 import { parseSandboxArg, type SandboxConfig, validateSandbox } from "./sandbox.js";
+import { detectRunningMomService } from "./service-state.js";
 
 const MOM_SLACK_APP_TOKEN = process.env.MOM_SLACK_APP_TOKEN;
 const MOM_SLACK_BOT_TOKEN = process.env.MOM_SLACK_BOT_TOKEN;
@@ -49,6 +50,12 @@ if (!MOM_SLACK_APP_TOKEN || !MOM_SLACK_BOT_TOKEN) {
 await validateSandbox(parsedArgs.sandbox);
 
 const workingDir = parsedArgs.workingDir;
+const runningService = detectRunningMomService(workingDir);
+if (runningService) {
+	console.log(`mom service already running via ${runningService.source} (pid ${runningService.pid})`);
+	process.exit(0);
+}
+
 const sandboxArg = parsedArgs.sandbox.type === "host" ? "host" : `docker:${parsedArgs.sandbox.container}`;
 const supervisorPidFile = join(workingDir, ".mom-service-supervisor.pid");
 

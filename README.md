@@ -39,6 +39,38 @@ Tools for building AI agents and managing LLM deployments.
 | **[@mariozechner/pi-web-ui](packages/web-ui)** | Web components for AI chat interfaces |
 | **[@mariozechner/pi-pods](packages/pods)** | CLI for managing vLLM deployments on GPU pods |
 
+## mom Service Architecture (Refactored)
+
+The Slack runtime in [`@mariozechner/pi-mom`](packages/mom) is split into focused services:
+
+- `slack-event-routing-service`: inbound Slack event routing rules
+- `slack-context-service`: quote prefix + response/update behavior
+- `mom-run-service`: per-channel run orchestration and lifecycle
+- `slack-service`: composition root that wires bot + run service + event watcher
+
+Startup modes:
+
+```bash
+# Full mom entrypoint (default)
+mom ./data
+
+# Standalone Slack service process
+cd packages/mom
+npm run run:slack-service -- ./data
+
+# Supervisor mode (manual restart model)
+cd packages/mom
+npm run run:slack-supervisor -- ./data
+
+# Supervisor control commands
+cd packages/mom
+npm run restart:slack-service -- ./data
+npm run stop:slack-service -- ./data
+npm run status:slack-service -- ./data
+```
+
+See also: [`packages/mom/src/services/README.md`](packages/mom/src/services/README.md).
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution guidelines and [AGENTS.md](AGENTS.md) for project-specific rules (for both humans and agents).
@@ -71,6 +103,12 @@ pnpm workflow:run:stop         # Stop background compiled pi
 pnpm workflow:run:status       # Check whether compiled pi is running
 pnpm workflow:run:logs         # Show current tmux pane output
 pnpm workflow:run:attach       # Attach to compiled pi session
+pnpm workflow:mom              # Detached run for mom service
+pnpm workflow:mom:restart      # Restart mom service session
+pnpm workflow:mom:stop         # Stop mom service session
+pnpm workflow:mom:status       # Check whether mom service session is running
+pnpm workflow:mom:logs         # Show mom service tmux pane output
+pnpm workflow:mom:attach       # Attach to mom service session
 pnpm workflow:sessions         # List tmux sessions
 pnpm workflow:session:kill -- <session-name>  # Delete a specific tmux session
 ```
