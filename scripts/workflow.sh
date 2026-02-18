@@ -23,6 +23,24 @@ require_cmd() {
 	fi
 }
 
+current_tmux_session_name() {
+	if [[ -z "${TMUX_PANE:-}" ]]; then
+		return 1
+	fi
+	tmux display-message -p -t "$TMUX_PANE" "#S" 2>/dev/null
+}
+
+ensure_not_self_kill() {
+	local session="$1"
+	local action="$2"
+	local current_session
+	current_session="$(current_tmux_session_name || true)"
+	if [[ -n "$current_session" && "$current_session" == "$session" ]]; then
+		echo "Refusing to $action tmux session '$session' from inside the same session." >&2
+		return 1
+	fi
+}
+
 start_dev_session() {
 	require_cmd tmux
 
@@ -110,6 +128,9 @@ manage_run_session() {
 		;;
 	restart)
 		if tmux has-session -t "$session" 2>/dev/null; then
+			if ! ensure_not_self_kill "$session" "restart"; then
+				return 1
+			fi
 			tmux kill-session -t "$session"
 		fi
 		tmux new-session -d -s "$session" -n "pi" -c "$ROOT_DIR" "bash -lc '$command'"
@@ -118,6 +139,9 @@ manage_run_session() {
 		;;
 	stop)
 		if tmux has-session -t "$session" 2>/dev/null; then
+			if ! ensure_not_self_kill "$session" "stop"; then
+				return 1
+			fi
 			tmux kill-session -t "$session"
 			echo "Stopped tmux session '$session'."
 		else
@@ -176,6 +200,9 @@ manage_mom_session() {
 		;;
 	restart)
 		if tmux has-session -t "$session" 2>/dev/null; then
+			if ! ensure_not_self_kill "$session" "restart"; then
+				return 1
+			fi
 			tmux kill-session -t "$session"
 		fi
 		tmux new-session -d -s "$session" -n "mom" -c "$ROOT_DIR" "bash -lc '$command'"
@@ -184,6 +211,9 @@ manage_mom_session() {
 		;;
 	stop)
 		if tmux has-session -t "$session" 2>/dev/null; then
+			if ! ensure_not_self_kill "$session" "stop"; then
+				return 1
+			fi
 			tmux kill-session -t "$session"
 			echo "Stopped tmux session '$session'."
 		else
@@ -238,6 +268,9 @@ kill_session() {
 	fi
 
 	if tmux has-session -t "$session" 2>/dev/null; then
+		if ! ensure_not_self_kill "$session" "kill"; then
+			exit 1
+		fi
 		tmux kill-session -t "$session"
 		echo "Killed tmux session '$session'."
 	else

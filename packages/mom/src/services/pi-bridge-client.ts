@@ -20,6 +20,18 @@ export interface PiBridgeResponse {
 	text: string;
 }
 
+export type PiBridgeStatusPhase = "received" | "queued" | "running" | "tool" | "waiting" | "completed" | "failed";
+
+export interface PiBridgeStatus {
+	id: string;
+	phase: PiBridgeStatusPhase;
+	text: string;
+	updatedAt: string;
+	details?: Record<string, string>;
+}
+
+export type PiBridgeStatusHandler = (status: PiBridgeStatus) => void | Promise<void>;
+
 interface PiBridgeQueuedRequest extends PiBridgeRequest {
 	id: string;
 	createdAt: string;
@@ -33,13 +45,14 @@ interface PiBridgeQueuedResponse {
 }
 
 export interface PiBridgeClient {
-	request(request: PiBridgeRequest, signal?: AbortSignal): Promise<PiBridgeResponse>;
+	request(request: PiBridgeRequest, signal?: AbortSignal, onStatus?: PiBridgeStatusHandler): Promise<PiBridgeResponse>;
 }
 
 interface BridgePaths {
 	root: string;
 	requestsDir: string;
 	responsesDir: string;
+	statusDir: string;
 }
 
 function isAbortError(error: unknown): boolean {
@@ -82,24 +95,77 @@ function getBridgePaths(workspaceRoot: string): BridgePaths {
 		root,
 		requestsDir: join(root, "requests"),
 		responsesDir: join(root, "responses"),
+		statusDir: join(root, "status"),
 	};
 }
 
 function ensureBridgePaths(paths: BridgePaths): void {
 	mkdirSync(paths.requestsDir, { recursive: true });
 	mkdirSync(paths.responsesDir, { recursive: true });
+	mkdirSync(paths.statusDir, { recursive: true });
+}
+
+function readStatus(statusFile: string): PiBridgeStatus | null {
+	if (!existsSync(statusFile)) {
+		return null;
+	}
+
+	try {
+		const raw = JSON.parse(readFileSync(statusFile, "utf8")) as Partial<PiBridgeStatus>;
+		if (
+			typeof raw.id !== "string" ||
+			typeof raw.phase !== "string" ||
+			typeof raw.text !== "string" ||
+			typeof raw.updatedAt !== "string"
+		) {
+			return null;
+		}
+
+		const details =
+			typeof raw.details === "object" && raw.details !== null
+				? Object.fromEntries(
+						Object.entries(raw.details).filter(
+							([key, value]) => typeof key === "string" && typeof value === "string",
+						),
+					)
+				: undefined;
+
+		return {
+			id: raw.id,
+			phase: raw.phase as PiBridgeStatusPhase,
+			text: raw.text,
+			updatedAt: raw.updatedAt,
+			details,
+		};
+	} catch {
+		return null;
+	}
 }
 
 async function waitForResponse(
 	responseFile: string,
+	statusFile: string,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	onStatus?: PiBridgeStatusHandler,
 ): Promise<PiBridgeQueuedResponse> {
 	const start = Date.now();
+	let lastStatusSignature = "";
 
 	while (Date.now() - start < timeoutMs) {
 		if (signal?.aborted) {
 			throw createAbortError();
+		}
+
+		if (onStatus) {
+			const status = readStatus(statusFile);
+			if (status) {
+				const signature = `${status.phase}:${status.updatedAt}:${status.text}`;
+				if (signature !== lastStatusSignature) {
+					lastStatusSignature = signature;
+					await onStatus(status);
+				}
+			}
 		}
 
 		if (existsSync(responseFile)) {
@@ -124,13 +190,18 @@ export class FileQueuePiBridgeClient implements PiBridgeClient {
 		return new FileQueuePiBridgeClient(workspaceRoot, timeoutMs);
 	}
 
-	async request(request: PiBridgeRequest, signal?: AbortSignal): Promise<PiBridgeResponse> {
+	async request(
+		request: PiBridgeRequest,
+		signal?: AbortSignal,
+		onStatus?: PiBridgeStatusHandler,
+	): Promise<PiBridgeResponse> {
 		const paths = getBridgePaths(this.workspaceRoot);
 		ensureBridgePaths(paths);
 
 		const id = randomUUID();
 		const requestFile = join(paths.requestsDir, `${id}.json`);
 		const responseFile = join(paths.responsesDir, `${id}.json`);
+		const statusFile = join(paths.statusDir, `${id}.json`);
 
 		const payload: PiBridgeQueuedRequest = {
 			id,
@@ -139,9 +210,17 @@ export class FileQueuePiBridgeClient implements PiBridgeClient {
 		};
 
 		writeFileSync(requestFile, `${JSON.stringify(payload)}\n`, "utf8");
+		if (onStatus) {
+			await onStatus({
+				id,
+				phase: "received",
+				text: "我收到了你的消息，已经开始处理。",
+				updatedAt: new Date().toISOString(),
+			});
+		}
 
 		try {
-			const response = await waitForResponse(responseFile, this.timeoutMs, signal);
+			const response = await waitForResponse(responseFile, statusFile, this.timeoutMs, signal, onStatus);
 			if (!response.ok) {
 				throw new Error(response.error ?? "pi bridge request failed");
 			}
@@ -160,6 +239,9 @@ export class FileQueuePiBridgeClient implements PiBridgeClient {
 			}
 			if (existsSync(responseFile)) {
 				rmSync(responseFile, { force: true });
+			}
+			if (existsSync(statusFile)) {
+				rmSync(statusFile, { force: true });
 			}
 		}
 	}
