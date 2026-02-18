@@ -28,6 +28,12 @@ export interface ExecutionResult {
 	risks: string[];
 	nextActions: string[];
 	rawResponse: string;
+	usage?: {
+		conversationInputTokens: number;
+		conversationOutputTokens: number;
+		executionInputTokens: number;
+		executionOutputTokens: number;
+	};
 }
 
 export interface NarrativeResponse {
@@ -43,6 +49,12 @@ export interface ConversationProfile {
 	verbosity: ResponseDetailLevel;
 	interactionPolicy: "execute_then_report" | "confirm_before_execute";
 	lexicon: Record<string, string>;
+}
+
+export interface ModelRoute {
+	conversationModel: "fast" | "balanced" | "quality";
+	executionModel: "fast" | "balanced" | "quality";
+	strategyVariant: "A" | "B";
 }
 
 export interface ConversationContext {

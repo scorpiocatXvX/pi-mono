@@ -10,7 +10,11 @@ import type {
 	UserMessageIntent,
 } from "./conversation-types.js";
 import { DefaultExecutionGateway, type ExecutionGateway } from "./execution-gateway-service.js";
+import { DefaultExecutionRunner, type ExecutionRunner } from "./execution-runner-service.js";
+import { DefaultModelRouter, type ModelRouter } from "./model-routing-service.js";
+import { DefaultOrchestrator, type Orchestrator } from "./orchestrator-service.js";
 import { FileQueuePiBridgeClient, type PiBridgeClient } from "./pi-bridge-client.js";
+import { FileRunObservability, type RunObservability } from "./run-observability-service.js";
 import { createSlackContext } from "./slack-context-service.js";
 
 const SLACK_REPLY_CHUNK_SIZE = 30_000;
@@ -44,6 +48,10 @@ interface MomRunServiceConfig {
 	createBridgeClient?: (workingDir: string) => PiBridgeClient;
 	createConversationAgent?: (workingDir: string) => ConversationAgent;
 	createExecutionGateway?: () => ExecutionGateway;
+	createExecutionRunner?: (bridgeClient: PiBridgeClient) => ExecutionRunner;
+	createModelRouter?: () => ModelRouter;
+	createOrchestrator?: () => Orchestrator;
+	createObservability?: (workingDir: string) => RunObservability;
 	now?: () => number;
 }
 
@@ -53,6 +61,10 @@ export class MomRunService implements MomHandler {
 	private readonly bridgeClient: PiBridgeClient;
 	private readonly conversationAgent: ConversationAgent;
 	private readonly executionGateway: ExecutionGateway;
+	private readonly executionRunner: ExecutionRunner;
+	private readonly modelRouter: ModelRouter;
+	private readonly orchestrator: Orchestrator;
+	private readonly observability: RunObservability;
 	private readonly now: () => number;
 	private readonly channelStates = new Map<string, ChannelState>();
 	private readonly createStore: (workingDir: string, botToken: string) => ChannelStore;
@@ -67,9 +79,19 @@ export class MomRunService implements MomHandler {
 		const conversationAgentFactory =
 			config.createConversationAgent ?? ((workingDir: string) => new FileConversationAgent(workingDir));
 		const executionGatewayFactory = config.createExecutionGateway ?? (() => new DefaultExecutionGateway());
+		const orchestratorFactory = config.createOrchestrator ?? (() => new DefaultOrchestrator());
+		const modelRouterFactory = config.createModelRouter ?? (() => new DefaultModelRouter());
+		const observabilityFactory =
+			config.createObservability ?? ((workingDir: string) => new FileRunObservability(workingDir));
 		this.bridgeClient = bridgeClientFactory(this.workingDir);
+		const executionRunnerFactory =
+			config.createExecutionRunner ?? ((bridgeClient: PiBridgeClient) => new DefaultExecutionRunner(bridgeClient));
 		this.conversationAgent = conversationAgentFactory(this.workingDir);
 		this.executionGateway = executionGatewayFactory();
+		this.executionRunner = executionRunnerFactory(this.bridgeClient);
+		this.modelRouter = modelRouterFactory();
+		this.orchestrator = orchestratorFactory();
+		this.observability = observabilityFactory(this.workingDir);
 		this.now = config.now ?? (() => Date.now());
 		this.createStore = config.createStore ?? ((workingDir, botToken) => new ChannelStore({ workingDir, botToken }));
 	}
@@ -117,22 +139,32 @@ export class MomRunService implements MomHandler {
 		};
 		const attachments = (event.attachments ?? []).map((attachment) => attachment.local);
 		const profile = this.conversationAgent.resolveProfile(conversationContext);
+		let runId = "";
 
 		try {
 			let intent: UserMessageIntent;
 			let taskCard: ExecutionTaskCard;
 			let bridgeRequest: ReturnType<ExecutionGateway["createBridgeRequest"]>;
 			let activeProfile = profile;
+			let traceStarted = false;
 			const nowMs = this.now();
 			const pendingApproval = state.pendingExecutionApproval;
 			if (pendingApproval && nowMs - pendingApproval.createdAtMs > EXECUTION_CONFIRMATION_TTL_MS) {
 				state.pendingExecutionApproval = undefined;
+				const expiredRunId = pendingApproval.bridgeRequest.runId;
+				if (expiredRunId) {
+					this.observability.event(expiredRunId, "confirmation", "approval expired");
+					this.observability.finish(expiredRunId, "cancelled");
+				}
 				await ctx.respond("上一次待确认任务已过期，请重新下达任务。", true);
 				return;
 			}
 
 			const activePendingApproval = state.pendingExecutionApproval;
 			if (activePendingApproval) {
+				if (activePendingApproval.bridgeRequest.runId) {
+					this.observability.markConfirmation(activePendingApproval.bridgeRequest.runId);
+				}
 				const confirmation = this.conversationAgent.readConfirmationDecision(event.text);
 				if (confirmation.decision === "cancel") {
 					if (confirmation.token && confirmation.token !== activePendingApproval.confirmationToken) {
@@ -143,6 +175,10 @@ export class MomRunService implements MomHandler {
 						return;
 					}
 					state.pendingExecutionApproval = undefined;
+					if (activePendingApproval.bridgeRequest.runId) {
+						this.observability.event(activePendingApproval.bridgeRequest.runId, "confirmation", "user cancelled");
+						this.observability.finish(activePendingApproval.bridgeRequest.runId, "cancelled");
+					}
 					await ctx.respond("已取消本次执行。你可以继续告诉我新的任务。", true);
 					return;
 				}
@@ -152,6 +188,13 @@ export class MomRunService implements MomHandler {
 						nowMs - activePendingApproval.lastReminderAtMs >= CONFIRMATION_REMINDER_DEBOUNCE_MS
 					) {
 						activePendingApproval.lastReminderAtMs = nowMs;
+						if (activePendingApproval.bridgeRequest.runId) {
+							this.observability.event(
+								activePendingApproval.bridgeRequest.runId,
+								"confirmation",
+								"reminder sent",
+							);
+						}
 						await ctx.respond(
 							`请回复“确认 ${activePendingApproval.confirmationToken}”继续执行，或回复“取消 ${activePendingApproval.confirmationToken}”终止。`,
 							true,
@@ -168,6 +211,8 @@ export class MomRunService implements MomHandler {
 				taskCard = activePendingApproval.taskCard;
 				bridgeRequest = activePendingApproval.bridgeRequest;
 				activeProfile = activePendingApproval.profile;
+				runId = bridgeRequest.runId ?? "";
+				traceStarted = runId.length > 0;
 			} else {
 				const confirmation = this.conversationAgent.readConfirmationDecision(event.text);
 				if (confirmation.decision === "confirm" || confirmation.decision === "cancel") {
@@ -176,16 +221,33 @@ export class MomRunService implements MomHandler {
 				}
 				intent = this.conversationAgent.buildIntent(event.text, attachments, profile);
 				if (intent.clarificationsNeeded.length > 0) {
-					await ctx.respond(intent.clarificationsNeeded.join("\n"), true);
+					runId = createRunId(event.ts);
+					this.observability.startRun(runId, event.channel, event.user);
+					this.observability.markClarification(runId);
+					const clarificationText = intent.clarificationsNeeded.join("\n");
+					this.observability.recordTokenUsage(
+						runId,
+						"conversation",
+						estimateTokens(event.text),
+						estimateTokens(clarificationText),
+					);
+					await ctx.respond(clarificationText, true);
+					this.observability.finish(runId, "cancelled");
 					return;
 				}
 				taskCard = this.executionGateway.createTaskCard(intent);
+				const plan = this.orchestrator.buildPlan(intent, taskCard);
+				const modelRoute = this.modelRouter.resolveRoute(intent, plan.runId);
 				bridgeRequest = this.executionGateway.createBridgeRequest(
+					intent,
 					taskCard,
+					plan,
 					conversationContext,
 					event.text,
 					attachments,
 				);
+				bridgeRequest.modelRoute = modelRoute;
+				runId = bridgeRequest.runId ?? plan.runId;
 				if (this.conversationAgent.requiresExecutionConfirmation(intent, taskCard, profile)) {
 					const confirmationToken = createConfirmationToken(event.ts);
 					state.pendingExecutionApproval = {
@@ -196,28 +258,59 @@ export class MomRunService implements MomHandler {
 						confirmationToken,
 						createdAtMs: nowMs,
 					};
+					this.observability.startRun(runId, event.channel, event.user);
+					traceStarted = true;
+					this.observability.markConfirmation(runId);
+					this.observability.event(runId, "model-route", "resolved model route", {
+						conversationModel: bridgeRequest.modelRoute?.conversationModel ?? "balanced",
+						executionModel: bridgeRequest.modelRoute?.executionModel ?? "quality",
+						strategyVariant: bridgeRequest.modelRoute?.strategyVariant ?? "A",
+					});
+					this.observability.event(runId, "confirmation", "awaiting user approval", {
+						token: confirmationToken,
+						riskLevel: taskCard.riskLevel,
+					});
 					await ctx.respond(this.conversationAgent.buildConfirmationPrompt(taskCard, confirmationToken), true);
 					return;
 				}
 			}
+
+			if (!runId) {
+				runId = createRunId(event.ts);
+			}
+			if (!traceStarted) {
+				this.observability.startRun(runId, event.channel, event.user);
+				traceStarted = true;
+			}
+			this.observability.recordTokenUsage(runId, "conversation", estimateTokens(event.text), 0);
+			this.observability.event(runId, "execution", "dispatching bridge request", {
+				riskLevel: taskCard.riskLevel,
+				timeoutMs: String(taskCard.budget.timeoutMs),
+				planSteps: String(bridgeRequest.executionPlan?.steps.length ?? 0),
+			});
 
 			await ctx.setTyping(true);
 			await ctx.replaceMessage(this.conversationAgent.buildAcknowledgement(intent));
 			await ctx.setWorking(true);
 
 			let lastStatusKey = "";
-			const result = await this.bridgeClient.request(
+			const executionResult = await this.executionRunner.executePlan(
 				{
 					...bridgeRequest,
 					threadTs: event.threadTs,
 					userName: slack.getUser(event.user)?.userName,
 				},
+				bridgeRequest.executionPlan ?? {
+					runId,
+					steps: [],
+				},
+				taskCard,
 				state.abortController.signal,
-				async (status) => {
+				async (step, status) => {
 					if (state.stopRequested) {
 						return;
 					}
-					const key = `${status.phase}:${status.updatedAt}:${status.text}`;
+					const key = `${step.id}:${status.phase}:${status.updatedAt}:${status.text}`;
 					if (key === lastStatusKey) {
 						return;
 					}
@@ -226,11 +319,27 @@ export class MomRunService implements MomHandler {
 					if (progressText.length > 0) {
 						await ctx.replaceMessage(progressText);
 					}
+					this.observability.recordRoundTrip(runId);
+					this.observability.event(runId, `status:${status.phase}`, status.text || "status update", {
+						stepId: step.id,
+						worker: step.worker,
+					});
 				},
 			);
 
+			this.observability.recordTokenUsage(
+				runId,
+				"execution",
+				executionResult.totalInputTokens,
+				executionResult.totalOutputTokens,
+			);
+
 			if (!state.stopRequested) {
-				await this.respondWithNarrative(ctx, intent, result.text, taskCard, activeProfile);
+				this.observability.recordTokenUsage(runId, "conversation", 0, estimateTokens(executionResult.finalText));
+				await this.respondWithNarrative(ctx, intent, executionResult.finalText, taskCard, activeProfile);
+				this.observability.finish(runId, "succeeded");
+			} else {
+				this.observability.finish(runId, "cancelled");
 			}
 
 			await ctx.setWorking(false);
@@ -247,12 +356,16 @@ export class MomRunService implements MomHandler {
 			if (!isAbortError(err) || !state.stopRequested) {
 				const errorMessage = err instanceof Error ? err.message : String(err);
 				log.logWarning(`[${event.channel}] Run error`, errorMessage);
+				this.observability.event(runId, "error", errorMessage);
+				this.observability.finish(runId, "failed");
 				try {
 					await ctx.replaceMessage(this.conversationAgent.buildFailureMessage(errorMessage));
 					await ctx.setWorking(false);
 				} catch {
 					// Slack best-effort.
 				}
+			} else {
+				this.observability.finish(runId, "cancelled");
 			}
 
 			if (state.stopRequested) {
@@ -332,6 +445,15 @@ export class MomRunService implements MomHandler {
 		this.channelStates.set(channelId, state);
 		return state;
 	}
+}
+
+function estimateTokens(text: string): number {
+	return Math.max(1, Math.ceil(text.length / 4));
+}
+
+function createRunId(messageTs: string): string {
+	const compact = messageTs.replace(/[^0-9]/g, "");
+	return `run-${compact.slice(-12) || "000000000000"}`;
 }
 
 function createConfirmationToken(messageTs: string): string {

@@ -22,10 +22,22 @@ This directory contains the Slack message pipeline split into focused services s
 - `execution-gateway-service.ts`
   - Protocol bridge from natural-language intent to structured task cards.
   - Builds normalized execution results for narrative rendering.
+- `model-routing-service.ts`
+  - Resolves conversation/execution model route and deterministic strategy variant (A/B).
+- `execution-runner-service.ts`
+  - Executes orchestrator plans step-by-step via the bridge client.
+  - Enforces per-task timeout/token budgets during execution.
+- `orchestrator-service.ts`
+  - Internal workflow planner producing worker-step execution plans.
+  - Encodes dependencies and parallel groups for structured execution traces.
+- `run-observability-service.ts`
+  - Persists per-run traces and aggregate metrics to disk.
+  - Enables replay, diagnostics, and execution success/failure tracking.
 - `mom-run-service.ts`
   - Orchestrates per-channel execution lifecycle (`run`, `stop`, state, filtering).
   - Implements `MomHandler` and is injected into `SlackBot` by `slack-service.ts`.
-  - Wires `ConversationAgent + ExecutionGateway + PiBridgeClient` as the default pipeline.
+  - Wires `ConversationAgent + ModelRouter + ExecutionGateway + Orchestrator + ExecutionRunner + PiBridgeClient` as the default pipeline.
+  - Persists run trace and aggregate metrics via `RunObservability`.
   - Supports high-risk confirmation turns with per-request confirmation token,
     TTL expiry, and confirmation reminder debounce.
 - `slack-service.ts`

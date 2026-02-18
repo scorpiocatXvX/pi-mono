@@ -14,6 +14,39 @@ interface BridgeRequest {
 	isEvent: boolean;
 	ts: string;
 	createdAt: string;
+	intent?: {
+		intentType: string;
+		goal: string;
+		constraints: string[];
+		clarificationsNeeded: string[];
+		toneProfileId: string;
+	};
+	taskCard?: {
+		objective: string;
+		inputs: string[];
+		doneCriteria: string[];
+		riskLevel: string;
+		budget: {
+			tokenBudget: number;
+			timeoutMs: number;
+		};
+	};
+	executionPlan?: {
+		runId: string;
+		steps: Array<{
+			id: string;
+			worker: string;
+			summary: string;
+			dependsOn: string[];
+			parallelGroup?: string;
+		}>;
+	};
+	runId?: string;
+	modelRoute?: {
+		conversationModel: string;
+		executionModel: string;
+		strategyVariant: string;
+	};
 }
 
 interface BridgeResponse {
@@ -77,6 +110,22 @@ function formatBridgePrompt(request: BridgeRequest): string {
 		request.text || "(empty message)",
 	];
 
+	if (request.intent) {
+		lines.push("", "<intent>", JSON.stringify(request.intent), "</intent>");
+	}
+	if (request.taskCard) {
+		lines.push("", "<task_card>", JSON.stringify(request.taskCard), "</task_card>");
+	}
+	if (request.executionPlan) {
+		lines.push("", "<execution_plan>", JSON.stringify(request.executionPlan), "</execution_plan>");
+	}
+	if (request.runId) {
+		lines.push("", `<run_id>${request.runId}</run_id>`);
+	}
+	if (request.modelRoute) {
+		lines.push("", "<model_route>", JSON.stringify(request.modelRoute), "</model_route>");
+	}
+
 	if (request.attachments.length > 0) {
 		lines.push("", "<slack_attachments>", ...request.attachments, "</slack_attachments>");
 	}
@@ -111,6 +160,20 @@ function readRequest(path: string): BridgeRequest | null {
 			isEvent: raw.isEvent,
 			ts: raw.ts,
 			createdAt: raw.createdAt,
+			intent: typeof raw.intent === "object" && raw.intent !== null ? (raw.intent as BridgeRequest["intent"]) : undefined,
+			taskCard:
+				typeof raw.taskCard === "object" && raw.taskCard !== null
+					? (raw.taskCard as BridgeRequest["taskCard"])
+					: undefined,
+			executionPlan:
+				typeof raw.executionPlan === "object" && raw.executionPlan !== null
+					? (raw.executionPlan as BridgeRequest["executionPlan"])
+					: undefined,
+			runId: typeof raw.runId === "string" ? raw.runId : undefined,
+			modelRoute:
+				typeof raw.modelRoute === "object" && raw.modelRoute !== null
+					? (raw.modelRoute as BridgeRequest["modelRoute"])
+					: undefined,
 		};
 	} catch {
 		return null;

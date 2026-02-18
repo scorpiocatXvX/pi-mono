@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
+import type { ExecutionTaskCard, ModelRoute, UserMessageIntent } from "./conversation-types.js";
+import type { ExecutionPlan } from "./orchestrator-service.js";
 
 const RESPONSE_POLL_INTERVAL_MS = 150;
 const DEFAULT_REQUEST_TIMEOUT_MS = 600_000;
@@ -14,6 +16,11 @@ export interface PiBridgeRequest {
 	attachments: string[];
 	isEvent: boolean;
 	ts: string;
+	intent?: UserMessageIntent;
+	taskCard?: ExecutionTaskCard;
+	executionPlan?: ExecutionPlan;
+	runId?: string;
+	modelRoute?: ModelRoute;
 }
 
 export interface PiBridgeResponse {
@@ -32,6 +39,10 @@ export interface PiBridgeStatus {
 
 export type PiBridgeStatusHandler = (status: PiBridgeStatus) => void | Promise<void>;
 
+export interface PiBridgeRequestOptions {
+	timeoutMs?: number;
+}
+
 interface PiBridgeQueuedRequest extends PiBridgeRequest {
 	id: string;
 	createdAt: string;
@@ -45,7 +56,12 @@ interface PiBridgeQueuedResponse {
 }
 
 export interface PiBridgeClient {
-	request(request: PiBridgeRequest, signal?: AbortSignal, onStatus?: PiBridgeStatusHandler): Promise<PiBridgeResponse>;
+	request(
+		request: PiBridgeRequest,
+		signal?: AbortSignal,
+		onStatus?: PiBridgeStatusHandler,
+		options?: PiBridgeRequestOptions,
+	): Promise<PiBridgeResponse>;
 }
 
 interface BridgePaths {
@@ -194,6 +210,7 @@ export class FileQueuePiBridgeClient implements PiBridgeClient {
 		request: PiBridgeRequest,
 		signal?: AbortSignal,
 		onStatus?: PiBridgeStatusHandler,
+		options?: PiBridgeRequestOptions,
 	): Promise<PiBridgeResponse> {
 		const paths = getBridgePaths(this.workspaceRoot);
 		ensureBridgePaths(paths);
@@ -220,7 +237,8 @@ export class FileQueuePiBridgeClient implements PiBridgeClient {
 		}
 
 		try {
-			const response = await waitForResponse(responseFile, statusFile, this.timeoutMs, signal, onStatus);
+			const effectiveTimeout = options?.timeoutMs ?? this.timeoutMs;
+			const response = await waitForResponse(responseFile, statusFile, effectiveTimeout, signal, onStatus);
 			if (!response.ok) {
 				throw new Error(response.error ?? "pi bridge request failed");
 			}

@@ -5,12 +5,15 @@ import type {
 	RiskLevel,
 	UserMessageIntent,
 } from "./conversation-types.js";
+import type { ExecutionPlan } from "./orchestrator-service.js";
 import type { PiBridgeRequest } from "./pi-bridge-client.js";
 
 export interface ExecutionGateway {
 	createTaskCard(intent: UserMessageIntent): ExecutionTaskCard;
 	createBridgeRequest(
+		intent: UserMessageIntent,
 		taskCard: ExecutionTaskCard,
+		plan: ExecutionPlan,
 		context: ConversationContext,
 		text: string,
 		attachments: string[],
@@ -72,7 +75,9 @@ export class DefaultExecutionGateway implements ExecutionGateway {
 	}
 
 	createBridgeRequest(
-		_taskCard: ExecutionTaskCard,
+		intent: UserMessageIntent,
+		taskCard: ExecutionTaskCard,
+		plan: ExecutionPlan,
 		context: ConversationContext,
 		text: string,
 		attachments: string[],
@@ -86,6 +91,10 @@ export class DefaultExecutionGateway implements ExecutionGateway {
 			attachments,
 			isEvent: context.isEvent,
 			ts: context.messageTs,
+			intent,
+			taskCard,
+			executionPlan: plan,
+			runId: plan.runId,
 		};
 	}
 
