@@ -23,10 +23,19 @@ interface BridgeResponse {
 	error?: string;
 }
 
+interface BridgeStatus {
+	id: string;
+	phase: "queued" | "running" | "tool" | "waiting" | "completed" | "failed";
+	text: string;
+	updatedAt: string;
+	details?: Record<string, string>;
+}
+
 interface BridgePaths {
 	root: string;
 	requestsDir: string;
 	responsesDir: string;
+	statusDir: string;
 }
 
 interface ActiveRequest {
@@ -46,12 +55,14 @@ function getPaths(cwd: string): BridgePaths {
 		root,
 		requestsDir: join(root, "requests"),
 		responsesDir: join(root, "responses"),
+		statusDir: join(root, "status"),
 	};
 }
 
 function ensurePaths(paths: BridgePaths): void {
 	mkdirSync(paths.requestsDir, { recursive: true });
 	mkdirSync(paths.responsesDir, { recursive: true });
+	mkdirSync(paths.statusDir, { recursive: true });
 }
 
 function getMarker(id: string): string {
@@ -111,6 +122,11 @@ function writeResponse(paths: BridgePaths, response: BridgeResponse): void {
 	writeFileSync(responseFile, `${JSON.stringify(response)}\n`, "utf8");
 }
 
+function writeStatus(paths: BridgePaths, status: BridgeStatus): void {
+	const statusFile = join(paths.statusDir, `${status.id}.json`);
+	writeFileSync(statusFile, `${JSON.stringify(status)}\n`, "utf8");
+}
+
 function removeFileIfExists(path: string): void {
 	if (existsSync(path)) {
 		rmSync(path, { force: true });
@@ -141,8 +157,27 @@ export default function (pi: ExtensionAPI) {
 		writeResponse(paths, response);
 		if (activeRequest) {
 			removeFileIfExists(activeRequest.requestPath);
+			removeFileIfExists(join(paths.statusDir, `${activeRequest.request.id}.json`));
 		}
 		activeRequest = null;
+	};
+
+	const emitStatus = (
+		paths: BridgePaths,
+		phase: BridgeStatus["phase"],
+		text: string,
+		details?: Record<string, string>,
+	): void => {
+		if (!activeRequest) {
+			return;
+		}
+		writeStatus(paths, {
+			id: activeRequest.request.id,
+			phase,
+			text,
+			updatedAt: new Date().toISOString(),
+			details,
+		});
 	};
 
 	const pollOnce = async (): Promise<void> => {
@@ -182,11 +217,14 @@ export default function (pi: ExtensionAPI) {
 				runStarted: false,
 				lastAssistantText: "",
 			};
+			emitStatus(paths, "queued", "我接到你的消息了，正在排队执行。");
 
 			try {
 				pi.sendUserMessage(prompt);
+				emitStatus(paths, "waiting", "我已经把任务提交给执行引擎，正在等待开始。");
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
+				emitStatus(paths, "failed", "任务提交失败，我正在返回错误信息。", { error: message });
 				finalizeRequest(paths, {
 					id: request.id,
 					ok: false,
@@ -217,7 +255,21 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (event.prompt.startsWith(getMarker(activeRequest.request.id))) {
 			activeRequest.runStarted = true;
+			if (extensionCtx) {
+				const paths = getPaths(extensionCtx.cwd);
+				ensurePaths(paths);
+				emitStatus(paths, "running", "我已经开始执行，先分析你的需求。");
+			}
 		}
+	});
+
+	pi.on("tool_call", (event, ctx) => {
+		if (!activeRequest || !activeRequest.runStarted) {
+			return;
+		}
+		const paths = getPaths(ctx.cwd);
+		ensurePaths(paths);
+		emitStatus(paths, "tool", `我正在执行步骤：${event.toolName}`);
 	});
 
 	pi.on("message_end", (event, ctx) => {
@@ -231,16 +283,19 @@ export default function (pi: ExtensionAPI) {
 
 		const assistantMessage = event.message as AssistantMessage;
 		const text = extractAssistantText(assistantMessage).trim();
+		const paths = getPaths(ctx.cwd);
+		ensurePaths(paths);
 		if (text.length > 0) {
 			activeRequest.lastAssistantText = text;
+			emitStatus(paths, "running", "我正在继续处理，已经拿到阶段性结果。");
 		}
 
 		if (assistantMessage.stopReason === "error" && assistantMessage.errorMessage) {
 			activeRequest.lastError = assistantMessage.errorMessage;
+			emitStatus(paths, "failed", "执行中遇到错误，我正在整理错误信息。", {
+				error: assistantMessage.errorMessage,
+			});
 		}
-
-		const paths = getPaths(ctx.cwd);
-		ensurePaths(paths);
 	});
 
 	pi.on("agent_end", (_event, ctx) => {
@@ -252,6 +307,9 @@ export default function (pi: ExtensionAPI) {
 		ensurePaths(paths);
 
 		if (activeRequest.lastError) {
+			emitStatus(paths, "failed", "执行失败，我马上把错误信息回给你。", {
+				error: activeRequest.lastError,
+			});
 			finalizeRequest(paths, {
 				id: activeRequest.request.id,
 				ok: false,
@@ -262,6 +320,9 @@ export default function (pi: ExtensionAPI) {
 
 		const text = activeRequest.lastAssistantText.trim();
 		if (text.length === 0) {
+			emitStatus(paths, "failed", "执行完成了，但没有产出可读结果。", {
+				error: "pi finished without a text response",
+			});
 			finalizeRequest(paths, {
 				id: activeRequest.request.id,
 				ok: false,
@@ -270,6 +331,9 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		emitStatus(paths, "completed", "处理完成，我正在整理最终回复。", {
+			output: "ready",
+		});
 		finalizeRequest(paths, {
 			id: activeRequest.request.id,
 			ok: true,

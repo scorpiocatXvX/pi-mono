@@ -2,8 +2,10 @@ import * as log from "../log.js";
 import type { SandboxConfig } from "../sandbox.js";
 import type { MomHandler, SlackBot, SlackEvent } from "../slack.js";
 import { ChannelStore } from "../store.js";
-import { FileQueuePiBridgeClient, type PiBridgeClient } from "./pi-bridge-client.js";
+import { FileQueuePiBridgeClient, type PiBridgeClient, type PiBridgeStatus } from "./pi-bridge-client.js";
 import { createSlackContext } from "./slack-context-service.js";
+
+const SLACK_REPLY_CHUNK_SIZE = 30_000;
 
 interface ChannelState {
 	running: boolean;
@@ -77,7 +79,10 @@ export class MomRunService implements MomHandler {
 
 		try {
 			await ctx.setTyping(true);
+			await ctx.replaceMessage("收到，我开始处理了。");
 			await ctx.setWorking(true);
+
+			let lastStatusKey = "";
 			const result = await this.bridgeClient.request(
 				{
 					channelId: event.channel,
@@ -90,12 +95,35 @@ export class MomRunService implements MomHandler {
 					ts: event.ts,
 				},
 				state.abortController.signal,
+				async (status) => {
+					if (state.stopRequested) {
+						return;
+					}
+					const key = `${status.phase}:${status.updatedAt}:${status.text}`;
+					if (key === lastStatusKey) {
+						return;
+					}
+					lastStatusKey = key;
+					const progressText = formatStatusUpdate(status);
+					if (progressText.length > 0) {
+						await ctx.replaceMessage(progressText);
+					}
+				},
 			);
 
 			if (!state.stopRequested) {
 				const responseText = result.text.trim();
 				if (responseText.length > 0) {
-					await ctx.respond(responseText, true);
+					const chunks = splitTextIntoChunks(responseText, SLACK_REPLY_CHUNK_SIZE);
+					if (chunks.length === 1) {
+						await ctx.respond(responseText, true);
+					} else {
+						await ctx.replaceMessage(chunks[0]);
+						for (let index = 1; index < chunks.length; index += 1) {
+							const header = `_(续 ${index + 1}/${chunks.length})_\n`;
+							await ctx.respondInThread(`${header}${chunks[index]}`);
+						}
+					}
 				} else {
 					await ctx.respond("_已处理完成，但 pi 没有返回文本结果。_", true);
 				}
@@ -116,7 +144,7 @@ export class MomRunService implements MomHandler {
 				const errorMessage = err instanceof Error ? err.message : String(err);
 				log.logWarning(`[${event.channel}] Run error`, errorMessage);
 				try {
-					await ctx.respond(`_处理失败: ${errorMessage}_`, true);
+					await ctx.replaceMessage(`_处理失败: ${errorMessage}_`);
 					await ctx.setWorking(false);
 				} catch {
 					// Slack best-effort.
@@ -172,6 +200,62 @@ export class MomRunService implements MomHandler {
 		this.channelStates.set(channelId, state);
 		return state;
 	}
+}
+
+function formatStatusUpdate(status: PiBridgeStatus): string {
+	if (status.text.trim().length > 0) {
+		return status.text.trim();
+	}
+
+	switch (status.phase) {
+		case "received":
+			return "收到，我开始处理了。";
+		case "queued":
+			return "我已经接单，正在排队执行。";
+		case "running":
+			return "我正在处理中。";
+		case "tool":
+			return "我正在执行关键步骤。";
+		case "waiting":
+			return "我还在继续处理，没有卡住。";
+		case "completed":
+			return "处理完成，正在整理结果。";
+		case "failed":
+			return "处理中出现异常，我正在整理错误信息。";
+		default:
+			return "我还在处理中。";
+	}
+}
+
+function splitTextIntoChunks(text: string, maxLength: number): string[] {
+	if (text.length <= maxLength) {
+		return [text];
+	}
+
+	const chunks: string[] = [];
+	let remaining = text;
+
+	while (remaining.length > maxLength) {
+		let splitIndex = remaining.lastIndexOf("\n\n", maxLength);
+		if (splitIndex < Math.floor(maxLength * 0.4)) {
+			splitIndex = remaining.lastIndexOf("\n", maxLength);
+		}
+		if (splitIndex < Math.floor(maxLength * 0.6)) {
+			splitIndex = remaining.lastIndexOf(" ", maxLength);
+		}
+		if (splitIndex <= 0) {
+			splitIndex = maxLength;
+		}
+
+		chunks.push(remaining.slice(0, splitIndex).trimEnd());
+		remaining = remaining.slice(splitIndex).trimStart();
+	}
+
+	if (remaining.length > 0) {
+		chunks.push(remaining);
+	}
+
+	return chunks.length > 0 ? chunks : [text];
 }
 
 function isAbortError(error: unknown): boolean {

@@ -124,6 +124,43 @@ class ChannelQueue {
 // SlackBot
 // ============================================================================
 
+const SLACK_TEXT_SAFE_LIMIT = 35_000;
+const SLACK_TRUNCATION_SUFFIX = "\n\n_(消息过长，已自动截断)_";
+
+function getSlackErrorCode(error: unknown): string | undefined {
+	if (typeof error !== "object" || error === null) {
+		return undefined;
+	}
+
+	if ("data" in error) {
+		const data = (error as { data?: unknown }).data;
+		if (typeof data === "object" && data !== null && "error" in data) {
+			const code = (data as { error?: unknown }).error;
+			if (typeof code === "string") {
+				return code;
+			}
+		}
+	}
+
+	if ("code" in error) {
+		const code = (error as { code?: unknown }).code;
+		if (typeof code === "string") {
+			return code;
+		}
+	}
+
+	return undefined;
+}
+
+function truncateSlackText(text: string): string {
+	if (text.length <= SLACK_TEXT_SAFE_LIMIT) {
+		return text;
+	}
+
+	const allowedLength = Math.max(0, SLACK_TEXT_SAFE_LIMIT - SLACK_TRUNCATION_SUFFIX.length);
+	return `${text.slice(0, allowedLength)}${SLACK_TRUNCATION_SUFFIX}`;
+}
+
 export class SlackBot {
 	private socketClient: SocketModeClient;
 	private webClient: WebClient;
@@ -194,12 +231,18 @@ export class SlackBot {
 	}
 
 	async postMessage(channel: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, text });
+		const result = await this.sendWithLengthFallback(
+			(messageText) => this.webClient.chat.postMessage({ channel, text: messageText }),
+			text,
+		);
 		return result.ts as string;
 	}
 
 	async updateMessage(channel: string, ts: string, text: string): Promise<void> {
-		await this.webClient.chat.update({ channel, ts, text });
+		await this.sendWithLengthFallback(
+			(messageText) => this.webClient.chat.update({ channel, ts, text: messageText }),
+			text,
+		);
 	}
 
 	async deleteMessage(channel: string, ts: string): Promise<void> {
@@ -207,7 +250,10 @@ export class SlackBot {
 	}
 
 	async postInThread(channel: string, threadTs: string, text: string): Promise<string> {
-		const result = await this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text });
+		const result = await this.sendWithLengthFallback(
+			(messageText) => this.webClient.chat.postMessage({ channel, thread_ts: threadTs, text: messageText }),
+			text,
+		);
 		return result.ts as string;
 	}
 
@@ -244,6 +290,24 @@ export class SlackBot {
 			attachments: [],
 			isBot: true,
 		});
+	}
+
+	private async sendWithLengthFallback<T>(action: (text: string) => Promise<T>, text: string): Promise<T> {
+		try {
+			return await action(text);
+		} catch (error) {
+			if (getSlackErrorCode(error) !== "msg_too_long") {
+				throw error;
+			}
+
+			const truncated = truncateSlackText(text);
+			if (truncated === text) {
+				throw error;
+			}
+
+			log.logWarning("Slack message exceeded limit; retrying with truncation");
+			return await action(truncated);
+		}
 	}
 
 	// ==========================================================================
