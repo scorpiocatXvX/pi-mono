@@ -2,10 +2,30 @@ import * as log from "../log.js";
 import type { SandboxConfig } from "../sandbox.js";
 import type { MomHandler, SlackBot, SlackEvent } from "../slack.js";
 import { ChannelStore } from "../store.js";
-import { FileQueuePiBridgeClient, type PiBridgeClient, type PiBridgeStatus } from "./pi-bridge-client.js";
+import { type ConversationAgent, FileConversationAgent } from "./conversation-agent-service.js";
+import type {
+	ConversationContext,
+	ConversationProfile,
+	ExecutionTaskCard,
+	UserMessageIntent,
+} from "./conversation-types.js";
+import { DefaultExecutionGateway, type ExecutionGateway } from "./execution-gateway-service.js";
+import { FileQueuePiBridgeClient, type PiBridgeClient } from "./pi-bridge-client.js";
 import { createSlackContext } from "./slack-context-service.js";
 
 const SLACK_REPLY_CHUNK_SIZE = 30_000;
+const EXECUTION_CONFIRMATION_TTL_MS = 10 * 60 * 1000;
+const CONFIRMATION_REMINDER_DEBOUNCE_MS = 3000;
+
+interface PendingExecutionApproval {
+	intent: UserMessageIntent;
+	profile: ConversationProfile;
+	taskCard: ExecutionTaskCard;
+	bridgeRequest: ReturnType<ExecutionGateway["createBridgeRequest"]>;
+	confirmationToken: string;
+	createdAtMs: number;
+	lastReminderAtMs?: number;
+}
 
 interface ChannelState {
 	running: boolean;
@@ -13,6 +33,7 @@ interface ChannelState {
 	stopRequested: boolean;
 	stopMessageTs?: string;
 	abortController?: AbortController;
+	pendingExecutionApproval?: PendingExecutionApproval;
 }
 
 interface MomRunServiceConfig {
@@ -21,12 +42,18 @@ interface MomRunServiceConfig {
 	botToken: string;
 	createStore?: (workingDir: string, botToken: string) => ChannelStore;
 	createBridgeClient?: (workingDir: string) => PiBridgeClient;
+	createConversationAgent?: (workingDir: string) => ConversationAgent;
+	createExecutionGateway?: () => ExecutionGateway;
+	now?: () => number;
 }
 
 export class MomRunService implements MomHandler {
 	private readonly workingDir: string;
 	private readonly botToken: string;
 	private readonly bridgeClient: PiBridgeClient;
+	private readonly conversationAgent: ConversationAgent;
+	private readonly executionGateway: ExecutionGateway;
+	private readonly now: () => number;
 	private readonly channelStates = new Map<string, ChannelState>();
 	private readonly createStore: (workingDir: string, botToken: string) => ChannelStore;
 	private activeRuns = 0;
@@ -37,7 +64,13 @@ export class MomRunService implements MomHandler {
 		this.botToken = config.botToken;
 		const bridgeClientFactory =
 			config.createBridgeClient ?? ((workingDir: string) => FileQueuePiBridgeClient.fromWorkingDir(workingDir));
+		const conversationAgentFactory =
+			config.createConversationAgent ?? ((workingDir: string) => new FileConversationAgent(workingDir));
+		const executionGatewayFactory = config.createExecutionGateway ?? (() => new DefaultExecutionGateway());
 		this.bridgeClient = bridgeClientFactory(this.workingDir);
+		this.conversationAgent = conversationAgentFactory(this.workingDir);
+		this.executionGateway = executionGatewayFactory();
+		this.now = config.now ?? (() => Date.now());
 		this.createStore = config.createStore ?? ((workingDir, botToken) => new ChannelStore({ workingDir, botToken }));
 	}
 
@@ -76,23 +109,108 @@ export class MomRunService implements MomHandler {
 		log.logInfo(`[${event.channel}] Starting run: ${event.text.substring(0, 50)}`);
 
 		const ctx = createSlackContext(event, slack, state, isEvent);
+		const conversationContext: ConversationContext = {
+			channelId: event.channel,
+			userId: event.user,
+			isEvent: Boolean(isEvent),
+			messageTs: event.ts,
+		};
+		const attachments = (event.attachments ?? []).map((attachment) => attachment.local);
+		const profile = this.conversationAgent.resolveProfile(conversationContext);
 
 		try {
+			let intent: UserMessageIntent;
+			let taskCard: ExecutionTaskCard;
+			let bridgeRequest: ReturnType<ExecutionGateway["createBridgeRequest"]>;
+			let activeProfile = profile;
+			const nowMs = this.now();
+			const pendingApproval = state.pendingExecutionApproval;
+			if (pendingApproval && nowMs - pendingApproval.createdAtMs > EXECUTION_CONFIRMATION_TTL_MS) {
+				state.pendingExecutionApproval = undefined;
+				await ctx.respond("上一次待确认任务已过期，请重新下达任务。", true);
+				return;
+			}
+
+			const activePendingApproval = state.pendingExecutionApproval;
+			if (activePendingApproval) {
+				const confirmation = this.conversationAgent.readConfirmationDecision(event.text);
+				if (confirmation.decision === "cancel") {
+					if (confirmation.token && confirmation.token !== activePendingApproval.confirmationToken) {
+						await ctx.respond(
+							`确认码不匹配。请回复“取消 ${activePendingApproval.confirmationToken}”终止。`,
+							true,
+						);
+						return;
+					}
+					state.pendingExecutionApproval = undefined;
+					await ctx.respond("已取消本次执行。你可以继续告诉我新的任务。", true);
+					return;
+				}
+				if (confirmation.decision !== "confirm") {
+					if (
+						!activePendingApproval.lastReminderAtMs ||
+						nowMs - activePendingApproval.lastReminderAtMs >= CONFIRMATION_REMINDER_DEBOUNCE_MS
+					) {
+						activePendingApproval.lastReminderAtMs = nowMs;
+						await ctx.respond(
+							`请回复“确认 ${activePendingApproval.confirmationToken}”继续执行，或回复“取消 ${activePendingApproval.confirmationToken}”终止。`,
+							true,
+						);
+					}
+					return;
+				}
+				if (confirmation.token !== activePendingApproval.confirmationToken) {
+					await ctx.respond(`确认码不匹配。请回复“确认 ${activePendingApproval.confirmationToken}”继续。`, true);
+					return;
+				}
+				state.pendingExecutionApproval = undefined;
+				intent = activePendingApproval.intent;
+				taskCard = activePendingApproval.taskCard;
+				bridgeRequest = activePendingApproval.bridgeRequest;
+				activeProfile = activePendingApproval.profile;
+			} else {
+				const confirmation = this.conversationAgent.readConfirmationDecision(event.text);
+				if (confirmation.decision === "confirm" || confirmation.decision === "cancel") {
+					await ctx.respond("当前没有待确认的任务。请先告诉我你希望执行什么。", true);
+					return;
+				}
+				intent = this.conversationAgent.buildIntent(event.text, attachments, profile);
+				if (intent.clarificationsNeeded.length > 0) {
+					await ctx.respond(intent.clarificationsNeeded.join("\n"), true);
+					return;
+				}
+				taskCard = this.executionGateway.createTaskCard(intent);
+				bridgeRequest = this.executionGateway.createBridgeRequest(
+					taskCard,
+					conversationContext,
+					event.text,
+					attachments,
+				);
+				if (this.conversationAgent.requiresExecutionConfirmation(intent, taskCard, profile)) {
+					const confirmationToken = createConfirmationToken(event.ts);
+					state.pendingExecutionApproval = {
+						intent,
+						profile,
+						taskCard,
+						bridgeRequest,
+						confirmationToken,
+						createdAtMs: nowMs,
+					};
+					await ctx.respond(this.conversationAgent.buildConfirmationPrompt(taskCard, confirmationToken), true);
+					return;
+				}
+			}
+
 			await ctx.setTyping(true);
-			await ctx.replaceMessage("收到，我开始处理了。");
+			await ctx.replaceMessage(this.conversationAgent.buildAcknowledgement(intent));
 			await ctx.setWorking(true);
 
 			let lastStatusKey = "";
 			const result = await this.bridgeClient.request(
 				{
-					channelId: event.channel,
+					...bridgeRequest,
 					threadTs: event.threadTs,
-					userId: event.user,
 					userName: slack.getUser(event.user)?.userName,
-					text: event.text,
-					attachments: (event.attachments ?? []).map((attachment) => attachment.local),
-					isEvent: Boolean(isEvent),
-					ts: event.ts,
 				},
 				state.abortController.signal,
 				async (status) => {
@@ -104,7 +222,7 @@ export class MomRunService implements MomHandler {
 						return;
 					}
 					lastStatusKey = key;
-					const progressText = formatStatusUpdate(status);
+					const progressText = this.conversationAgent.buildStatusUpdate(status);
 					if (progressText.length > 0) {
 						await ctx.replaceMessage(progressText);
 					}
@@ -112,21 +230,7 @@ export class MomRunService implements MomHandler {
 			);
 
 			if (!state.stopRequested) {
-				const responseText = result.text.trim();
-				if (responseText.length > 0) {
-					const chunks = splitTextIntoChunks(responseText, SLACK_REPLY_CHUNK_SIZE);
-					if (chunks.length === 1) {
-						await ctx.respond(responseText, true);
-					} else {
-						await ctx.replaceMessage(chunks[0]);
-						for (let index = 1; index < chunks.length; index += 1) {
-							const header = `_(续 ${index + 1}/${chunks.length})_\n`;
-							await ctx.respondInThread(`${header}${chunks[index]}`);
-						}
-					}
-				} else {
-					await ctx.respond("_已处理完成，但 pi 没有返回文本结果。_", true);
-				}
+				await this.respondWithNarrative(ctx, intent, result.text, taskCard, activeProfile);
 			}
 
 			await ctx.setWorking(false);
@@ -144,7 +248,7 @@ export class MomRunService implements MomHandler {
 				const errorMessage = err instanceof Error ? err.message : String(err);
 				log.logWarning(`[${event.channel}] Run error`, errorMessage);
 				try {
-					await ctx.replaceMessage(`_处理失败: ${errorMessage}_`);
+					await ctx.replaceMessage(this.conversationAgent.buildFailureMessage(errorMessage));
 					await ctx.setWorking(false);
 				} catch {
 					// Slack best-effort.
@@ -168,6 +272,34 @@ export class MomRunService implements MomHandler {
 					resolve();
 				}
 			}
+		}
+	}
+
+	private async respondWithNarrative(
+		ctx: ReturnType<typeof createSlackContext>,
+		_intent: UserMessageIntent,
+		responseText: string,
+		taskCard: ExecutionTaskCard,
+		profile: ConversationProfile,
+	): Promise<void> {
+		const executionResult = this.executionGateway.buildExecutionResult(responseText, taskCard);
+		const narrative = this.conversationAgent.buildNarrativeResponse(executionResult, profile);
+
+		if (narrative.userSummary.trim().length === 0) {
+			await ctx.respond("_已处理完成，但 pi 没有返回文本结果。_", true);
+			return;
+		}
+
+		const chunks = splitTextIntoChunks(narrative.userSummary, SLACK_REPLY_CHUNK_SIZE);
+		if (chunks.length === 1) {
+			await ctx.respond(narrative.userSummary, true);
+			return;
+		}
+
+		await ctx.replaceMessage(chunks[0]);
+		for (let index = 1; index < chunks.length; index += 1) {
+			const header = `_(续 ${index + 1}/${chunks.length})_\n`;
+			await ctx.respondInThread(`${header}${chunks[index]}`);
 		}
 	}
 
@@ -202,29 +334,9 @@ export class MomRunService implements MomHandler {
 	}
 }
 
-function formatStatusUpdate(status: PiBridgeStatus): string {
-	if (status.text.trim().length > 0) {
-		return status.text.trim();
-	}
-
-	switch (status.phase) {
-		case "received":
-			return "收到，我开始处理了。";
-		case "queued":
-			return "我已经接单，正在排队执行。";
-		case "running":
-			return "我正在处理中。";
-		case "tool":
-			return "我正在执行关键步骤。";
-		case "waiting":
-			return "我还在继续处理，没有卡住。";
-		case "completed":
-			return "处理完成，正在整理结果。";
-		case "failed":
-			return "处理中出现异常，我正在整理错误信息。";
-		default:
-			return "我还在处理中。";
-	}
+function createConfirmationToken(messageTs: string): string {
+	const compact = messageTs.replace(/[^0-9]/g, "");
+	return compact.slice(-6) || "000000";
 }
 
 function splitTextIntoChunks(text: string, maxLength: number): string[] {

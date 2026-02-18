@@ -10,9 +10,24 @@ This directory contains the Slack message pipeline split into focused services s
 - `slack-context-service.ts`
   - Builds the runtime Slack context used by the runner.
   - Handles quote prefix generation and main-message update/send behavior.
+- `conversation-types.ts`
+  - Stable contracts between communication and execution layers.
+  - Defines `UserMessageIntent`, `ExecutionTaskCard`, `ExecutionResult`, and `NarrativeResponse`.
+- `conversation-agent-service.ts`
+  - Outbound/inbound conversation shaping (tone, wording, profile resolution).
+  - Converts status/events into user-facing language.
+  - Reads optional profile overrides from `<workingDir>/conversation-profiles.json`
+    (example: `packages/mom/docs/conversation-profiles.example.json`).
+  - Validates profile shape and logs warnings on malformed entries.
+- `execution-gateway-service.ts`
+  - Protocol bridge from natural-language intent to structured task cards.
+  - Builds normalized execution results for narrative rendering.
 - `mom-run-service.ts`
   - Orchestrates per-channel execution lifecycle (`run`, `stop`, state, filtering).
   - Implements `MomHandler` and is injected into `SlackBot` by `slack-service.ts`.
+  - Wires `ConversationAgent + ExecutionGateway + PiBridgeClient` as the default pipeline.
+  - Supports high-risk confirmation turns with per-request confirmation token,
+    TTL expiry, and confirmation reminder debounce.
 - `slack-service.ts`
   - Composes `SlackBot`, `MomRunService`, and event watcher into a standalone runtime unit.
 

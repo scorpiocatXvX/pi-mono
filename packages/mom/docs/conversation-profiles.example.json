@@ -1,0 +1,30 @@
+{
+  "defaults": {
+    "tone": "teammate",
+    "verbosity": "standard",
+    "interactionPolicy": "execute_then_report",
+    "lexicon": {
+      "PR": "合并请求"
+    }
+  },
+  "channels": {
+    "C0AEW9P3BJP": {
+      "tone": "technical",
+      "verbosity": "brief",
+      "interactionPolicy": "confirm_before_execute",
+      "lexicon": {
+        "check": "检查"
+      }
+    }
+  },
+  "users": {
+    "UFRM97EGJ": {
+      "tone": "teammate",
+      "verbosity": "detailed",
+      "interactionPolicy": "execute_then_report",
+      "lexicon": {
+        "workflow": "工作流"
+      }
+    }
+  }
+}
